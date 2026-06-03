@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from appresolver.backends import podman
-from appresolver.backends.podman import execute_plan, plan_destroy_environment, plan_environment
+from appresolver.backends.podman import (
+    execute_plan,
+    plan_destroy_environment,
+    plan_environment,
+    plan_start_environment,
+    plan_stop_environment,
+)
 from appresolver.environment import EnvironmentManifest
 from appresolver.errors import BackendError
 
@@ -97,6 +103,68 @@ def test_plan_destroy_environment_to_dict_keeps_command_arrays() -> None:
 def test_plan_destroy_environment_rejects_non_container_backend() -> None:
     with pytest.raises(BackendError, match="backend 'container'"):
         plan_destroy_environment(make_environment_manifest(backend="flatpak", status="created"))
+
+
+def test_plan_start_environment_returns_expected_podman_action() -> None:
+    plan = plan_start_environment(make_environment_manifest(status="created"))
+
+    assert plan.environment_id == "ubuntu-24.04-default"
+    assert plan.backend == "podman"
+    assert [action.id for action in plan.actions] == ["start-container"]
+    assert plan.actions[0].description == "Start managed environment container"
+    assert plan.actions[0].command == ["podman", "start", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_plan_start_environment_commands_are_lists_not_shell_strings() -> None:
+    plan = plan_start_environment(make_environment_manifest(status="created"))
+
+    for action in plan.actions:
+        assert isinstance(action.command, list)
+        assert all(isinstance(part, str) for part in action.command)
+
+
+def test_plan_start_environment_to_dict_keeps_command_arrays() -> None:
+    plan = plan_start_environment(make_environment_manifest(status="created"))
+
+    output = plan.to_dict()
+
+    assert output["actions"][0]["command"] == ["podman", "start", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_plan_start_environment_rejects_non_container_backend() -> None:
+    with pytest.raises(BackendError, match="backend 'container'"):
+        plan_start_environment(make_environment_manifest(backend="flatpak", status="created"))
+
+
+def test_plan_stop_environment_returns_expected_podman_action() -> None:
+    plan = plan_stop_environment(make_environment_manifest(status="running"))
+
+    assert plan.environment_id == "ubuntu-24.04-default"
+    assert plan.backend == "podman"
+    assert [action.id for action in plan.actions] == ["stop-container"]
+    assert plan.actions[0].description == "Stop managed environment container"
+    assert plan.actions[0].command == ["podman", "stop", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_plan_stop_environment_commands_are_lists_not_shell_strings() -> None:
+    plan = plan_stop_environment(make_environment_manifest(status="running"))
+
+    for action in plan.actions:
+        assert isinstance(action.command, list)
+        assert all(isinstance(part, str) for part in action.command)
+
+
+def test_plan_stop_environment_to_dict_keeps_command_arrays() -> None:
+    plan = plan_stop_environment(make_environment_manifest(status="running"))
+
+    output = plan.to_dict()
+
+    assert output["actions"][0]["command"] == ["podman", "stop", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_plan_stop_environment_rejects_non_container_backend() -> None:
+    with pytest.raises(BackendError, match="backend 'container'"):
+        plan_stop_environment(make_environment_manifest(backend="flatpak", status="running"))
 
 
 def test_execute_plan_calls_central_runner_with_planned_commands(monkeypatch: pytest.MonkeyPatch) -> None:

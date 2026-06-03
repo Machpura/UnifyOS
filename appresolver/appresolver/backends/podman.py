@@ -87,6 +87,46 @@ def plan_destroy_environment(manifest: EnvironmentManifest) -> PodmanPlan:
     )
 
 
+def plan_start_environment(manifest: EnvironmentManifest) -> PodmanPlan:
+    if manifest.backend != "container":
+        raise BackendError(
+            f"Podman start planning requires environment backend 'container', got '{manifest.backend}'"
+        )
+
+    container_name = f"appresolver-env-{manifest.environment_id}"
+    return PodmanPlan(
+        environment_id=manifest.environment_id,
+        backend="podman",
+        actions=[
+            PlannedAction(
+                id="start-container",
+                description="Start managed environment container",
+                command=["podman", "start", container_name],
+            )
+        ],
+    )
+
+
+def plan_stop_environment(manifest: EnvironmentManifest) -> PodmanPlan:
+    if manifest.backend != "container":
+        raise BackendError(
+            f"Podman stop planning requires environment backend 'container', got '{manifest.backend}'"
+        )
+
+    container_name = f"appresolver-env-{manifest.environment_id}"
+    return PodmanPlan(
+        environment_id=manifest.environment_id,
+        backend="podman",
+        actions=[
+            PlannedAction(
+                id="stop-container",
+                description="Stop managed environment container",
+                command=["podman", "stop", container_name],
+            )
+        ],
+    )
+
+
 def execute_plan(plan: PodmanPlan) -> None:
     for action in plan.actions:
         run_command(action.command)

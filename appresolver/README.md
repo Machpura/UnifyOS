@@ -123,6 +123,34 @@ python -m appresolver create-environment ubuntu-24.04-default --execute
 python -m appresolver create-environment ubuntu-24.04-default --execute --json
 ```
 
+Start a created or stopped environment runtime. Without `--execute`, this prints the planned start and does not call Podman or mutate state:
+
+```bash
+python -m appresolver start-environment ubuntu-24.04-default
+python -m appresolver --json start-environment ubuntu-24.04-default
+```
+
+Execute the planned start and mark the environment as `running` only after `podman start` succeeds:
+
+```bash
+python -m appresolver start-environment ubuntu-24.04-default --execute
+python -m appresolver start-environment ubuntu-24.04-default --execute --json
+```
+
+Stop a running environment runtime. Without `--execute`, this prints the planned stop and does not call Podman or mutate state:
+
+```bash
+python -m appresolver stop-environment ubuntu-24.04-default
+python -m appresolver --json stop-environment ubuntu-24.04-default
+```
+
+Execute the planned stop and mark the environment as `stopped` only after `podman stop` succeeds:
+
+```bash
+python -m appresolver stop-environment ubuntu-24.04-default --execute
+python -m appresolver stop-environment ubuntu-24.04-default --execute --json
+```
+
 Destroy a created environment runtime. Without `--execute`, this prints the planned cleanup and does not call Podman or mutate state:
 
 ```bash
@@ -138,6 +166,14 @@ python -m appresolver destroy-environment ubuntu-24.04-default --execute --json
 ```
 
 `destroy-environment` removes only the runtime container. It does not delete the environment definition.
+Running environments must be stopped before destroy.
+
+Environment lifecycle:
+
+```text
+defined -> created -> running -> stopped -> running
+created/stopped -> destroyed -> defined
+```
 
 Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not install packages inside containers, export apps from containers, or remove containers during failure cleanup in v0.
 
@@ -182,6 +218,7 @@ Included:
 - environment definition manifests
 - Podman environment command planning
 - explicit Podman environment creation with `--execute`
+- explicit Podman environment start/stop lifecycle with `--execute`
 - explicit Podman environment runtime cleanup with `destroy-environment --execute`
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
