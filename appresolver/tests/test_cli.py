@@ -247,6 +247,19 @@ def test_import_appimage_writes_managed_file_launcher_and_manifest(
     assert capsys.readouterr().out.startswith("Imported Example as managed AppImage\n")
 
 
+def test_import_appimage_with_custom_registry_dir_uses_sibling_state_dirs(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "custom-state" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+
+    assert exit_code == 0
+    assert (tmp_path / "custom-state" / "apps" / "Example.json").exists()
+    assert (tmp_path / "custom-state" / "appimages" / "Example.AppImage").exists()
+    assert (tmp_path / "custom-state" / "launchers" / "Example.desktop").exists()
+    assert not (tmp_path / ".appresolver").exists()
+
+
 def test_dry_run_import_appimage_mutates_nothing(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     registry_dir = tmp_path / ".appresolver" / "apps"
     source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")

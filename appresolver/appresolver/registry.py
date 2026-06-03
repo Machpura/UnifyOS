@@ -7,13 +7,14 @@ from typing import Any
 
 from appresolver.errors import AppNotFoundError, InvalidAppIdError, ManifestError, RegistryError
 from appresolver.manifest import AppManifest
+from appresolver.state import StatePaths
 
 
 APP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def default_registry_dir() -> Path:
-    return Path.cwd() / ".appresolver" / "apps"
+    return StatePaths.default().apps_dir
 
 
 def validate_app_id(app_id: str) -> str:
@@ -95,4 +96,3 @@ class AppRegistry:
 
     def exists(self, app_id: str) -> bool:
         return self.path_for(app_id).exists()
-
