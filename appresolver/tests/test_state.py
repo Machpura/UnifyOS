@@ -34,6 +34,14 @@ def test_state_paths_from_custom_registry_dir_derive_sibling_dirs(tmp_path: Path
     assert state_paths.environments_dir == tmp_path / "custom-state" / "environments"
 
 
+def test_state_paths_construction_creates_no_directories(tmp_path: Path) -> None:
+    state_paths = StatePaths.from_registry_dir(tmp_path / ".appresolver" / "apps")
+
+    assert not state_paths.state_root.exists()
+    assert not state_paths.apps_dir.exists()
+    assert not state_paths.environments_dir.exists()
+
+
 def test_validate_inside_state_root_accepts_paths_under_state_root(tmp_path: Path) -> None:
     state_paths = StatePaths.from_registry_dir(tmp_path / "state" / "apps")
 
@@ -47,4 +55,3 @@ def test_validate_inside_state_root_rejects_paths_outside_state_root(tmp_path: P
 
     with pytest.raises(BackendError, match="outside resolver state"):
         state_paths.validate_inside_state_root(tmp_path / "outside.AppImage")
-
