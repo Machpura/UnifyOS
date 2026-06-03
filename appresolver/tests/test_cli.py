@@ -10,9 +10,11 @@ from pytest import CaptureFixture
 from appresolver.backends.appimage import appimages_dir_for_registry, launcher_path, launchers_dir_for_registry, managed_appimage_path
 from appresolver.backends import flatpak
 from appresolver.cli import main
+from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import CommandExecutionError, RegistryError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry
+from appresolver.state import StatePaths
 
 
 def make_manifest(app_id: str = "com.example.App") -> AppManifest:
@@ -442,3 +444,409 @@ def test_uninstall_appimage_outside_launcher_path_keeps_manifest_and_managed_fil
     assert registry.exists("Example")
     assert managed_path.exists()
     assert outside_launcher.exists()
+
+
+def test_define_environment_writes_manifest_with_defaults(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    state_paths = StatePaths.from_registry_dir(registry_dir)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+
+    manifest = EnvironmentRegistry(state_paths.environments_dir).load("ubuntu-24.04-default")
+    assert exit_code == 0
+    assert manifest.environment_id == "ubuntu-24.04-default"
+    assert manifest.name == "Ubuntu 24.04 Default"
+    assert manifest.backend == "container"
+    assert manifest.image == "ubuntu:24.04"
+    assert manifest.status == "defined"
+    assert manifest.source == {"type": "manual"}
+    assert manifest.permissions == {}
+    assert manifest.apps == []
+    assert capsys.readouterr().out.startswith("Defined environment ubuntu-24.04-default\n")
+
+
+def test_dry_run_define_environment_creates_no_environment_directory(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    state_paths = StatePaths.from_registry_dir(registry_dir)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "--dry-run",
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+
+    assert exit_code == 0
+    assert not state_paths.environments_dir.exists()
+    assert "Would write environment manifest:" in capsys.readouterr().out
+
+
+def test_subcommand_dry_run_define_environment_creates_no_environment_directory(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    state_paths = StatePaths.from_registry_dir(registry_dir)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    assert not state_paths.environments_dir.exists()
+    assert "Would write environment manifest:" in capsys.readouterr().out
+
+
+def test_define_environment_duplicate_does_not_overwrite_existing_manifest(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Original Name",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "New Name",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:latest",
+        ]
+    )
+
+    assert exit_code == 1
+    assert environment_registry.load("ubuntu-24.04-default").name == "Original Name"
+
+
+def test_list_environments_human_output_is_sorted(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    for environment_id in ["ubuntu-24.04-default", "fedora-latest", "arch-community"]:
+        main(
+            [
+                "--registry-dir",
+                str(registry_dir),
+                "define-environment",
+                environment_id,
+                "--name",
+                environment_id,
+                "--backend",
+                "container",
+                "--image",
+                "example:latest",
+            ]
+        )
+        capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "list-environments"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == "\n".join(
+        [
+            "arch-community\tcontainer\tdefined",
+            "fedora-latest\tcontainer\tdefined",
+            "ubuntu-24.04-default\tcontainer\tdefined",
+            "",
+        ]
+    )
+
+
+def test_list_environments_empty_human_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "list-environments"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == "No resolver-managed environments.\n"
+
+
+def test_list_environments_json_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "list-environments"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output[0]["environment_id"] == "ubuntu-24.04-default"
+    assert output[0]["name"] == "Ubuntu 24.04 Default"
+    assert output[0]["backend"] == "container"
+    assert output[0]["image"] == "ubuntu:24.04"
+    assert output[0]["status"] == "defined"
+    assert "created_at" in output[0]
+
+
+def test_subcommand_json_list_environments_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "list-environments", "--json"])
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_show_environment_human_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "show-environment", "ubuntu-24.04-default"])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert output.startswith("Environment ubuntu-24.04-default:\n")
+    assert '"status": "defined"' in output
+    assert '"source": {' in output
+
+
+def test_show_environment_json_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "show-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["environment_id"] == "ubuntu-24.04-default"
+    assert output["source"] == {"type": "manual"}
+    assert output["permissions"] == {}
+    assert output["apps"] == []
+
+
+def test_subcommand_json_show_environment_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "show-environment", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["environment_id"] == "ubuntu-24.04-default"
+
+
+def test_delete_environment_removes_manifest(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "delete-environment", "ubuntu-24.04-default"])
+
+    assert exit_code == 0
+    assert not environment_registry.exists("ubuntu-24.04-default")
+    assert capsys.readouterr().out == "Deleted environment ubuntu-24.04-default\n"
+
+
+def test_dry_run_delete_environment_does_not_delete_manifest(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--dry-run", "delete-environment", "ubuntu-24.04-default"])
+
+    assert exit_code == 0
+    assert environment_registry.exists("ubuntu-24.04-default")
+    assert "Would delete environment manifest:" in capsys.readouterr().out
+
+
+def test_subcommand_dry_run_delete_environment_does_not_delete_manifest(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "delete-environment", "ubuntu-24.04-default", "--dry-run"]
+    )
+
+    assert exit_code == 0
+    assert environment_registry.exists("ubuntu-24.04-default")
+    assert "Would delete environment manifest:" in capsys.readouterr().out
+
+
+def test_show_environment_missing_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "show-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_delete_environment_missing_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "delete-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_define_environment_with_custom_registry_dir_uses_sibling_environments_dir(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "custom-state" / "apps"
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "custom-state" / "environments" / "ubuntu-24.04-default.json").exists()
+    assert not (tmp_path / ".appresolver").exists()

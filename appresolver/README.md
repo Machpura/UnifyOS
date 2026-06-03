@@ -74,6 +74,36 @@ python -m appresolver --dry-run import-appimage ~/Downloads/Example.AppImage
 
 Managed AppImages are copied into `./.appresolver/appimages/`, local launchers are written into `./.appresolver/launchers/`, and manifests are written into `./.appresolver/apps/`.
 
+Define an environment record without creating runtime resources:
+
+```bash
+python -m appresolver define-environment ubuntu-24.04-default --name "Ubuntu 24.04 Default" --backend container --image ubuntu:24.04
+```
+
+Inspect the planned definition without writing state:
+
+```bash
+python -m appresolver --dry-run define-environment ubuntu-24.04-default --name "Ubuntu 24.04 Default" --backend container --image ubuntu:24.04
+```
+
+List and show environment definitions:
+
+```bash
+python -m appresolver list-environments
+python -m appresolver --json list-environments
+python -m appresolver show-environment ubuntu-24.04-default
+python -m appresolver --json show-environment ubuntu-24.04-default
+```
+
+Delete an environment definition:
+
+```bash
+python -m appresolver delete-environment ubuntu-24.04-default
+python -m appresolver --dry-run delete-environment ubuntu-24.04-default
+```
+
+Environment definitions are stored in `./.appresolver/environments/`. These commands only manage definition manifests; they do not create containers, call Podman, install packages, or start runtime environments.
+
 Show stored permissions:
 
 ```bash
@@ -112,6 +142,7 @@ Included:
 - project-local app registry
 - Flatpak install, permissions, list, and uninstall commands
 - managed AppImage import and uninstall
+- environment definition manifests
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
@@ -125,4 +156,5 @@ Not included:
 - AppImage execution during import
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
+- container creation or package installation
 - permission enforcement beyond Flatpak-reported permission readout
