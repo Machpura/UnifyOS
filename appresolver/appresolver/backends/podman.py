@@ -5,6 +5,7 @@ from typing import Any
 
 from appresolver.environment import EnvironmentManifest
 from appresolver.errors import BackendError
+from appresolver.subprocess_runner import run_command
 
 
 @dataclass(frozen=True)
@@ -65,3 +66,7 @@ def plan_environment(manifest: EnvironmentManifest) -> PodmanPlan:
         ],
     )
 
+
+def execute_plan(plan: PodmanPlan) -> None:
+    for action in plan.actions:
+        run_command(action.command)

@@ -39,6 +39,28 @@ class EnvironmentRegistry:
             self.cleanup_temp_path(temp_path)
             raise
 
+    def update(self, manifest: EnvironmentManifest) -> None:
+        validate_environment_id(manifest.environment_id)
+        path = self.path_for(manifest.environment_id)
+        temp_path = self.temp_path_for(manifest.environment_id)
+        if not path.exists():
+            raise AppNotFoundError(f"environment '{manifest.environment_id}' is not managed by App Resolver")
+
+        self.validate_registry_path(path)
+        try:
+            self.environments_dir.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if not path.exists():
+                raise AppNotFoundError(f"environment '{manifest.environment_id}' is not managed by App Resolver")
+            self.validate_registry_path(path)
+            temp_path.replace(path)
+        except OSError as exc:
+            self.cleanup_temp_path(temp_path)
+            raise RegistryError(f"failed to update environment manifest for {manifest.environment_id}: {exc}") from exc
+        except (AppNotFoundError, RegistryError):
+            self.cleanup_temp_path(temp_path)
+            raise
+
     def load(self, environment_id: str) -> EnvironmentManifest:
         path = self.path_for(environment_id)
         if not path.exists():

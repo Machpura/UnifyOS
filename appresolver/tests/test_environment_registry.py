@@ -45,6 +45,35 @@ def test_environment_registry_save_refuses_to_overwrite_existing_manifest(tmp_pa
     assert registry.load("ubuntu-24.04-default").image == "ubuntu:24.04"
 
 
+def test_environment_registry_update_replaces_existing_manifest(tmp_path: Path) -> None:
+    registry = EnvironmentRegistry(tmp_path)
+    manifest = make_environment_manifest("ubuntu-24.04-default")
+    registry.save(manifest)
+
+    registry.update(
+        EnvironmentManifest(
+            environment_id=manifest.environment_id,
+            name=manifest.name,
+            backend=manifest.backend,
+            image=manifest.image,
+            status="created",
+            created_at=manifest.created_at,
+            permissions=manifest.permissions,
+            apps=manifest.apps,
+            source=manifest.source,
+        )
+    )
+
+    assert registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_environment_registry_update_missing_manifest_raises_clear_error(tmp_path: Path) -> None:
+    registry = EnvironmentRegistry(tmp_path)
+
+    with pytest.raises(AppNotFoundError, match="not managed"):
+        registry.update(make_environment_manifest("ubuntu-24.04-default"))
+
+
 def test_environment_registry_failed_save_leaves_no_final_or_temp_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -63,6 +92,40 @@ def test_environment_registry_failed_save_leaves_no_final_or_temp_manifest(
         registry.save(make_environment_manifest("ubuntu-24.04-default"))
 
     assert not (tmp_path / "ubuntu-24.04-default.json").exists()
+    assert not (tmp_path / ".ubuntu-24.04-default.json.tmp").exists()
+
+
+def test_environment_registry_failed_update_keeps_existing_manifest_and_removes_temp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = EnvironmentRegistry(tmp_path)
+    registry.save(make_environment_manifest("ubuntu-24.04-default"))
+    original_write_text = Path.write_text
+
+    def failing_write_text(path: Path, *args: object, **kwargs: object) -> int:
+        if path.name == ".ubuntu-24.04-default.json.tmp":
+            original_write_text(path, "partial", encoding="utf-8")
+            raise OSError("blocked")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    with pytest.raises(RegistryError, match="failed to update"):
+        registry.update(
+            EnvironmentManifest(
+                environment_id="ubuntu-24.04-default",
+                name="ubuntu-24.04-default",
+                backend="container",
+                image="ubuntu:24.04",
+                status="created",
+                created_at="2026-06-03T12:00:00+00:00",
+                permissions={},
+                apps=[],
+                source={"type": "manual"},
+            )
+        )
+
+    assert registry.load("ubuntu-24.04-default").status == "defined"
     assert not (tmp_path / ".ubuntu-24.04-default.json.tmp").exists()
 
 

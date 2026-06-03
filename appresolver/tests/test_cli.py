@@ -8,7 +8,7 @@ import pytest
 from pytest import CaptureFixture
 
 from appresolver.backends.appimage import appimages_dir_for_registry, launcher_path, launchers_dir_for_registry, managed_appimage_path
-from appresolver.backends import flatpak
+from appresolver.backends import flatpak, podman
 from appresolver.cli import main
 from appresolver.environment import EnvironmentManifest
 from appresolver.environment_registry import EnvironmentRegistry
@@ -51,6 +51,30 @@ def write_appimage(path: Path, content: str = "#!/bin/sh\nexit 0\n") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def save_environment_manifest(
+    registry_dir: Path,
+    environment_id: str = "ubuntu-24.04-default",
+    backend: str = "container",
+    image: str = "ubuntu:24.04",
+    status: str = "defined",
+) -> EnvironmentRegistry:
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    environment_registry.save(
+        EnvironmentManifest(
+            environment_id=environment_id,
+            name=environment_id,
+            backend=backend,
+            image=image,
+            status=status,
+            created_at="2026-06-03T12:00:00+00:00",
+            permissions={},
+            apps=[],
+            source={"type": "manual"},
+        )
+    )
+    return environment_registry
 
 
 def test_global_json_flag_before_list_outputs_json_array(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -1103,5 +1127,228 @@ def test_plan_environment_non_container_backend_exits_nonzero(tmp_path: Path) ->
     )
 
     exit_code = main(["--registry-dir", str(registry_dir), "plan-environment", "flatpak-env"])
+
+    assert exit_code == 1
+
+
+def test_create_environment_plan_only_does_not_call_subprocess_or_mutate_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir)
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only create-environment must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Planned Podman actions for ubuntu-24.04-default:" in output
+    assert "Execution not performed. Re-run with --execute to create the environment." in output
+    assert environment_registry.load("ubuntu-24.04-default").status == "defined"
+
+
+def test_create_environment_execute_calls_podman_and_updates_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ["podman", "pull", "ubuntu:24.04"],
+        [
+            "podman",
+            "create",
+            "--name",
+            "appresolver-env-ubuntu-24.04-default",
+            "--label",
+            "appresolver.environment_id=ubuntu-24.04-default",
+            "ubuntu:24.04",
+            "sleep",
+            "infinity",
+        ],
+    ]
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+    assert capsys.readouterr().out.startswith("Created environment ubuntu-24.04-default\n")
+
+
+def test_create_environment_pull_failure_prevents_create_and_leaves_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        raise CommandExecutionError("pull failed")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert calls == [["podman", "pull", "ubuntu:24.04"]]
+    assert environment_registry.load("ubuntu-24.04-default").status == "defined"
+
+
+def test_create_environment_create_failure_leaves_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[1] == "create":
+            raise CommandExecutionError("create failed")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert [command[1] for command in calls] == ["pull", "create"]
+    assert environment_registry.load("ubuntu-24.04-default").status == "defined"
+
+
+def test_create_environment_manifest_update_failure_warns_container_may_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise RegistryError("registry blocked")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert [command[1] for command in calls] == ["pull", "create"]
+    assert "container may exist but registry update failed" in stderr
+
+
+def test_create_environment_execute_refuses_already_created_without_podman_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("already-created environment must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert "already created" in stderr
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_create_environment_global_json_plan_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "create-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["environment_id"] == "ubuntu-24.04-default"
+    assert output["backend"] == "podman"
+    assert output["status"] == "planned"
+    assert output["executed"] is False
+    assert output["actions"][0]["command"] == ["podman", "pull", "ubuntu:24.04"]
+
+
+def test_create_environment_subcommand_json_plan_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "create-environment", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "planned"
+    assert output["executed"] is False
+
+
+def test_create_environment_execute_json_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "create-environment",
+            "ubuntu-24.04-default",
+            "--execute",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "created"
+    assert output["executed"] is True
+    assert output["actions"][1]["command"][1] == "create"
+
+
+def test_create_environment_missing_environment_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "create-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_create_environment_non_container_backend_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, environment_id="flatpak-env", backend="flatpak", image="runtime")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "create-environment", "flatpak-env"])
 
     assert exit_code == 1

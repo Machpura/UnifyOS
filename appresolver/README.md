@@ -2,7 +2,7 @@
 
 App Resolver v0 is a CLI prototype for managing apps through one normalized registry.
 
-This version supports Flatpak installs and managed AppImage imports. It does not include a GUI, containers, Wine, AUR, or system components.
+This version supports Flatpak installs, managed AppImage imports, and explicit Podman environment creation. It does not include a GUI, Wine, AUR, or system components.
 
 ## Registry
 
@@ -109,7 +109,21 @@ python -m appresolver plan-environment ubuntu-24.04-default
 python -m appresolver --json plan-environment ubuntu-24.04-default
 ```
 
-Environment definitions are stored in `./.appresolver/environments/`. These commands only manage definition manifests; they do not create containers, call Podman, install packages, or start runtime environments.
+Create a defined container environment. Without `--execute`, this prints the same plan and does not call Podman or mutate state:
+
+```bash
+python -m appresolver create-environment ubuntu-24.04-default
+python -m appresolver --json create-environment ubuntu-24.04-default
+```
+
+Execute the planned Podman actions and mark the environment as created only after `podman pull` and `podman create` both succeed:
+
+```bash
+python -m appresolver create-environment ubuntu-24.04-default --execute
+python -m appresolver create-environment ubuntu-24.04-default --execute --json
+```
+
+Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not install packages inside containers, export apps from containers, or remove containers during failure cleanup in v0.
 
 Show stored permissions:
 
@@ -150,20 +164,21 @@ Included:
 - Flatpak install, permissions, list, and uninstall commands
 - managed AppImage import and uninstall
 - environment definition manifests
-- Podman environment command planning without execution
+- Podman environment command planning
+- explicit Podman environment creation with `--execute`
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
 Not included:
 
 - GUI/App Center
-- containers
 - Wine or Proton
 - AUR
 - system components
 - AppImage execution during import
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
-- container creation or package installation
-- Podman execution or availability checks
+- package installation inside containers
+- app export from containers
+- Podman availability checks
 - permission enforcement beyond Flatpak-reported permission readout

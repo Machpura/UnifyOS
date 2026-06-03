@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from appresolver.backends.podman import plan_environment
+from appresolver.backends import podman
+from appresolver.backends.podman import execute_plan, plan_environment
 from appresolver.environment import EnvironmentManifest
 from appresolver.errors import BackendError
 
@@ -65,3 +66,17 @@ def test_plan_environment_rejects_non_container_backend() -> None:
     with pytest.raises(BackendError, match="backend 'container'"):
         plan_environment(make_environment_manifest(backend="flatpak"))
 
+
+def test_execute_plan_calls_central_runner_with_planned_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan = plan_environment(make_environment_manifest())
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> object:
+        calls.append(command)
+        return object()
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    execute_plan(plan)
+
+    assert calls == [action.command for action in plan.actions]

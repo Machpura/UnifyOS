@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,13 @@ from appresolver.backends.appimage import (
     validate_source_path,
 )
 from appresolver.backends.flatpak import install_flatpak, uninstall_flatpak
-from appresolver.backends.podman import PodmanPlan, plan_environment
+from appresolver.backends.podman import PodmanPlan, execute_plan, plan_environment
 from appresolver.environment import EnvironmentManifest
 from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import AppResolverError
 from appresolver.manifest import AppManifest, utc_timestamp
 from appresolver.registry import AppRegistry, default_registry_dir, validate_app_id
+from appresolver.runtime_policy import EXECUTE, RuntimePolicy
 from appresolver.state import StatePaths
 
 
@@ -123,6 +125,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="print structured JSON output",
     )
 
+    create_environment_parser = subparsers.add_parser(
+        "create-environment", help="create a defined container environment with Podman"
+    )
+    create_environment_parser.add_argument("environment_id")
+    create_environment_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute planned Podman actions",
+    )
+    create_environment_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
     list_parser = subparsers.add_parser("list", help="list resolver-managed apps")
     list_parser.add_argument(
         "--json",
@@ -184,6 +203,13 @@ def main(argv: list[str] | None = None) -> int:
             return command_delete_environment(environment_registry, args.environment_id, args.dry_run)
         if args.command == "plan-environment":
             return command_plan_environment(environment_registry, args.environment_id, args.json_output)
+        if args.command == "create-environment":
+            return command_create_environment(
+                environment_registry,
+                args.environment_id,
+                args.execute,
+                args.json_output,
+            )
         if args.command == "list":
             return command_list(registry, args.json_output)
         if args.command == "permissions":
@@ -296,6 +322,51 @@ def command_plan_environment(
         return 0
 
     print_plan(plan)
+    return 0
+
+
+def command_create_environment(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    plan = plan_environment(manifest)
+    if not execute:
+        if as_json:
+            print_json(create_environment_result(plan, status="planned", executed=False))
+            return 0
+
+        print_plan(plan)
+        print("Execution not performed. Re-run with --execute to create the environment.")
+        return 0
+
+    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"create environment {manifest.environment_id}")
+    if manifest.status == "created":
+        raise AppResolverError(
+            f"environment '{manifest.environment_id}' is already created; refusing to recreate managed container"
+        )
+
+    execute_plan(plan)
+    created_manifest = replace(manifest, status="created")
+    try:
+        environment_registry.update(created_manifest)
+    except AppResolverError as exc:
+        raise AppResolverError(
+            "environment container may exist but registry update failed "
+            f"for '{manifest.environment_id}': {exc}"
+        ) from exc
+
+    if as_json:
+        print_json(create_environment_result(plan, status="created", executed=True))
+        return 0
+
+    print(f"Created environment {manifest.environment_id}")
+    print("Executed Podman actions:")
+    for action in plan.actions:
+        print(" ".join(action.command))
+    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
     return 0
 
 
@@ -415,6 +486,16 @@ def print_plan(plan: PodmanPlan) -> None:
     print(f"Planned Podman actions for {plan.environment_id}:")
     for action in plan.actions:
         print(" ".join(action.command))
+
+
+def create_environment_result(plan: PodmanPlan, status: str, executed: bool) -> dict[str, Any]:
+    return {
+        "environment_id": plan.environment_id,
+        "backend": plan.backend,
+        "status": status,
+        "executed": executed,
+        "actions": [action.to_dict() for action in plan.actions],
+    }
 
 
 def print_json(value: Any) -> None:
