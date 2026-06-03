@@ -501,6 +501,8 @@ def test_dry_run_define_environment_creates_no_environment_directory(
     )
 
     assert exit_code == 0
+    assert not state_paths.state_root.exists()
+    assert not state_paths.apps_dir.exists()
     assert not state_paths.environments_dir.exists()
     assert "Would write environment manifest:" in capsys.readouterr().out
 
@@ -528,8 +530,58 @@ def test_subcommand_dry_run_define_environment_creates_no_environment_directory(
     )
 
     assert exit_code == 0
+    assert not state_paths.state_root.exists()
+    assert not state_paths.apps_dir.exists()
     assert not state_paths.environments_dir.exists()
     assert "Would write environment manifest:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "environment_id",
+    [
+        "../x",
+        "a/b",
+        "a\\b",
+        ".hidden",
+        "-bad",
+        "bad env",
+        "bad$env",
+    ],
+)
+def test_define_environment_rejects_unsafe_environment_ids(tmp_path: Path, environment_id: str) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    if environment_id.startswith("-"):
+        argv = [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "--name",
+            "Unsafe",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+            "--",
+            environment_id,
+        ]
+    else:
+        argv = [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            environment_id,
+            "--name",
+            "Unsafe",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+
+    exit_code = main(argv)
+
+    assert exit_code == 1
+    assert not StatePaths.from_registry_dir(registry_dir).environments_dir.exists()
 
 
 def test_define_environment_duplicate_does_not_overwrite_existing_manifest(tmp_path: Path) -> None:
@@ -638,6 +690,7 @@ def test_list_environments_json_output(tmp_path: Path, capsys: CaptureFixture[st
     assert output[0]["image"] == "ubuntu:24.04"
     assert output[0]["status"] == "defined"
     assert "created_at" in output[0]
+    assert set(output[0]) == {"environment_id", "name", "backend", "image", "status", "created_at"}
 
 
 def test_subcommand_json_list_environments_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -813,6 +866,18 @@ def test_subcommand_dry_run_delete_environment_does_not_delete_manifest(
     assert "Would delete environment manifest:" in capsys.readouterr().out
 
 
+def test_dry_run_delete_missing_environment_creates_no_directories(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    state_paths = StatePaths.from_registry_dir(registry_dir)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--dry-run", "delete-environment", "missing-env"])
+
+    assert exit_code == 1
+    assert not state_paths.state_root.exists()
+    assert not state_paths.apps_dir.exists()
+    assert not state_paths.environments_dir.exists()
+
+
 def test_show_environment_missing_exits_nonzero(tmp_path: Path) -> None:
     registry_dir = tmp_path / ".appresolver" / "apps"
 
@@ -850,3 +915,52 @@ def test_define_environment_with_custom_registry_dir_uses_sibling_environments_d
     assert exit_code == 0
     assert (tmp_path / "custom-state" / "environments" / "ubuntu-24.04-default.json").exists()
     assert not (tmp_path / ".appresolver").exists()
+
+
+def test_define_environment_with_custom_registry_dir_containing_spaces(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "custom state root" / "apps"
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "custom state root" / "environments" / "ubuntu-24.04-default.json").exists()
+    assert not (tmp_path / ".appresolver").exists()
+
+
+def test_show_environment_with_corrupt_manifest_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environments_dir = StatePaths.from_registry_dir(registry_dir).environments_dir
+    environments_dir.mkdir(parents=True)
+    (environments_dir / "ubuntu-24.04-default.json").write_text("{", encoding="utf-8")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "show-environment", "ubuntu-24.04-default"])
+
+    assert exit_code == 1
+
+
+def test_delete_environment_refuses_symlink_resolving_outside_environments_dir(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environments_dir = StatePaths.from_registry_dir(registry_dir).environments_dir
+    outside_file = tmp_path / "outside.json"
+    outside_file.write_text("outside", encoding="utf-8")
+    environments_dir.mkdir(parents=True)
+    (environments_dir / "ubuntu-24.04-default.json").symlink_to(outside_file)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "delete-environment", "ubuntu-24.04-default"])
+
+    assert exit_code == 1
+    assert outside_file.exists()
+    assert (environments_dir / "ubuntu-24.04-default.json").exists()

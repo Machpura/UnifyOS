@@ -22,11 +22,22 @@ class EnvironmentRegistry:
     def save(self, manifest: EnvironmentManifest) -> None:
         validate_environment_id(manifest.environment_id)
         path = self.path_for(manifest.environment_id)
+        temp_path = self.temp_path_for(manifest.environment_id)
+        if path.exists():
+            raise RegistryError(f"environment '{manifest.environment_id}' is already managed by App Resolver")
+
         try:
             self.environments_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temp_path.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if path.exists():
+                raise RegistryError(f"environment '{manifest.environment_id}' is already managed by App Resolver")
+            temp_path.replace(path)
         except OSError as exc:
+            self.cleanup_temp_path(temp_path)
             raise RegistryError(f"failed to save environment manifest for {manifest.environment_id}: {exc}") from exc
+        except RegistryError:
+            self.cleanup_temp_path(temp_path)
+            raise
 
     def load(self, environment_id: str) -> EnvironmentManifest:
         path = self.path_for(environment_id)
@@ -69,11 +80,31 @@ class EnvironmentRegistry:
         if not path.exists():
             raise AppNotFoundError(f"environment '{environment_id}' is not managed by App Resolver")
 
+        resolved_path = self.validate_registry_path(path)
         try:
-            path.unlink()
+            resolved_path.unlink()
         except OSError as exc:
             raise RegistryError(f"failed to delete environment manifest for {environment_id}: {exc}") from exc
 
     def exists(self, environment_id: str) -> bool:
         return self.path_for(environment_id).exists()
 
+    def temp_path_for(self, environment_id: str) -> Path:
+        filename = filename_for_environment_id(environment_id)
+        return self.environments_dir / f".{filename}.tmp"
+
+    def validate_registry_path(self, path: Path) -> Path:
+        resolved_path = path.resolve(strict=False)
+        resolved_dir = self.environments_dir.resolve(strict=False)
+        if resolved_path == resolved_dir or resolved_path.is_relative_to(resolved_dir):
+            return resolved_path
+        raise RegistryError(f"environment manifest path is outside environment registry: {path}")
+
+    def cleanup_temp_path(self, temp_path: Path) -> None:
+        try:
+            resolved_temp_path = self.validate_registry_path(temp_path)
+            resolved_temp_path.unlink(missing_ok=True)
+        except OSError:
+            return
+        except RegistryError:
+            return
