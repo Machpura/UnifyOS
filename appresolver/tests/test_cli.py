@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
-from appresolver.backends.appimage import launcher_path, managed_appimage_path
+from appresolver.backends.appimage import appimages_dir_for_registry, launcher_path, launchers_dir_for_registry, managed_appimage_path
 from appresolver.backends import flatpak
 from appresolver.cli import main
-from appresolver.errors import CommandExecutionError
+from appresolver.errors import CommandExecutionError, RegistryError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry
 
@@ -255,6 +255,8 @@ def test_dry_run_import_appimage_mutates_nothing(tmp_path: Path, capsys: Capture
 
     assert exit_code == 0
     assert not registry_dir.exists()
+    assert not appimages_dir_for_registry(registry_dir).exists()
+    assert not launchers_dir_for_registry(registry_dir).exists()
     assert not managed_appimage_path(registry_dir, "Example").exists()
     assert not launcher_path(registry_dir, "Example").exists()
     assert "Would copy:" in capsys.readouterr().out
@@ -270,6 +272,8 @@ def test_subcommand_dry_run_import_appimage_mutates_nothing(
 
     assert exit_code == 0
     assert not registry_dir.exists()
+    assert not appimages_dir_for_registry(registry_dir).exists()
+    assert not launchers_dir_for_registry(registry_dir).exists()
     assert "Would write manifest:" in capsys.readouterr().out
 
 
@@ -352,3 +356,76 @@ def test_uninstall_appimage_file_removal_failure_keeps_manifest(
 
     assert exit_code == 1
     assert AppRegistry(registry_dir).exists("Example")
+
+
+def test_import_appimage_manifest_save_failure_cleans_up_managed_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    def fail_save(self: AppRegistry, manifest: AppManifest) -> None:
+        raise RegistryError("registry blocked")
+
+    monkeypatch.setattr(AppRegistry, "save", fail_save)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+
+    assert exit_code == 1
+    assert not managed_appimage_path(registry_dir, "Example").exists()
+    assert not launcher_path(registry_dir, "Example").exists()
+    assert not (registry_dir / "Example.json").exists()
+
+
+def test_uninstall_appimage_outside_managed_path_keeps_manifest_and_outside_file(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    registry = AppRegistry(registry_dir)
+    manifest = make_appimage_manifest(registry_dir, "Example")
+    outside_path = tmp_path / "outside.AppImage"
+    outside_path.write_text("outside", encoding="utf-8")
+    registry.save(
+        AppManifest(
+            app_id=manifest.app_id,
+            name=manifest.name,
+            backend=manifest.backend,
+            source={**manifest.source, "managed_path": str(outside_path)},
+            permissions=manifest.permissions,
+            trust_tier=manifest.trust_tier,
+            installed_at=manifest.installed_at,
+        )
+    )
+
+    exit_code = main(["--registry-dir", str(registry_dir), "uninstall", "Example"])
+
+    assert exit_code == 1
+    assert registry.exists("Example")
+    assert outside_path.exists()
+
+
+def test_uninstall_appimage_outside_launcher_path_keeps_manifest_and_managed_file(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    registry = AppRegistry(registry_dir)
+    manifest = make_appimage_manifest(registry_dir, "Example")
+    managed_path = Path(str(manifest.source["managed_path"]))
+    managed_path.parent.mkdir(parents=True)
+    managed_path.write_text("managed", encoding="utf-8")
+    outside_launcher = tmp_path / "outside.desktop"
+    outside_launcher.write_text("outside", encoding="utf-8")
+    registry.save(
+        AppManifest(
+            app_id=manifest.app_id,
+            name=manifest.name,
+            backend=manifest.backend,
+            source={**manifest.source, "launcher_path": str(outside_launcher)},
+            permissions=manifest.permissions,
+            trust_tier=manifest.trust_tier,
+            installed_at=manifest.installed_at,
+        )
+    )
+
+    exit_code = main(["--registry-dir", str(registry_dir), "uninstall", "Example"])
+
+    assert exit_code == 1
+    assert registry.exists("Example")
+    assert managed_path.exists()
+    assert outside_launcher.exists()

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from appresolver.backends.appimage import (
+    cleanup_import_artifacts,
     derive_app_id,
     import_appimage,
     launcher_path,
@@ -149,7 +150,16 @@ def command_import_appimage(registry: AppRegistry, source_path: Path, dry_run: b
         return 0
 
     manifest = import_appimage(resolved_source, registry.registry_dir)
-    registry.save(manifest)
+    try:
+        registry.save(manifest)
+    except AppResolverError:
+        cleanup_import_artifacts(
+            registry.registry_dir,
+            Path(str(manifest.source["managed_path"])),
+            Path(str(manifest.source["launcher_path"])),
+            registry.path_for(manifest.app_id),
+        )
+        raise
     print(f"Imported {app_id} as managed AppImage")
     print(f"Manifest: {registry.path_for(app_id)}")
     return 0
@@ -192,7 +202,7 @@ def command_uninstall(registry: AppRegistry, app_id: str, dry_run: bool) -> int:
     if manifest.backend == "flatpak":
         uninstall_flatpak(app_id)
     elif manifest.backend == "appimage":
-        uninstall_appimage(manifest)
+        uninstall_appimage(manifest, registry.registry_dir)
     else:
         raise AppResolverError(f"unsupported backend for uninstall in v0: {manifest.backend}")
 

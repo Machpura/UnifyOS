@@ -16,6 +16,10 @@ def state_root_for_registry(registry_dir: Path) -> Path:
     return registry_dir.parent
 
 
+def resolve_state_root(registry_dir: Path) -> Path:
+    return state_root_for_registry(registry_dir).resolve()
+
+
 def appimages_dir_for_registry(registry_dir: Path) -> Path:
     return state_root_for_registry(registry_dir) / "appimages"
 
@@ -65,6 +69,7 @@ def import_appimage(source_path: Path, registry_dir: Path) -> AppManifest:
         make_executable(managed_path)
         write_launcher(app_id, managed_path, desktop_path)
     except OSError as exc:
+        cleanup_import_artifacts(registry_dir, managed_path, desktop_path)
         raise BackendError(f"failed to import AppImage {resolved_source}: {exc}") from exc
 
     return AppManifest(
@@ -98,7 +103,7 @@ def write_launcher(app_id: str, managed_path: Path, desktop_path: Path) -> None:
             "[Desktop Entry]",
             "Type=Application",
             f"Name={app_id}",
-            f"Exec={managed_path}",
+            f"Exec={quote_desktop_exec_path(managed_path)}",
             "Terminal=false",
             "",
         ]
@@ -106,14 +111,23 @@ def write_launcher(app_id: str, managed_path: Path, desktop_path: Path) -> None:
     desktop_path.write_text(launcher, encoding="utf-8")
 
 
-def uninstall_appimage(manifest: AppManifest) -> None:
+def quote_desktop_exec_path(path: Path) -> str:
+    value = str(path)
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return f'"{escaped}"'
+
+
+def uninstall_appimage(manifest: AppManifest, registry_dir: Path) -> None:
     if manifest.backend != "appimage":
         raise BackendError(f"cannot uninstall non-AppImage manifest with AppImage backend: {manifest.backend}")
 
     managed_path = source_path_from_manifest(manifest, "managed_path")
     desktop_path = source_path_from_manifest(manifest, "launcher_path")
-    remove_if_present(managed_path)
-    remove_if_present(desktop_path)
+    state_root = resolve_state_root(registry_dir)
+    resolved_managed_path = validate_managed_path(managed_path, state_root)
+    resolved_desktop_path = validate_managed_path(desktop_path, state_root)
+    remove_resolved_if_present(resolved_managed_path)
+    remove_resolved_if_present(resolved_desktop_path)
 
 
 def source_path_from_manifest(manifest: AppManifest, key: str) -> Path:
@@ -123,11 +137,40 @@ def source_path_from_manifest(manifest: AppManifest, key: str) -> Path:
     return Path(value)
 
 
-def remove_if_present(path: Path) -> None:
+def cleanup_import_artifacts(registry_dir: Path, *paths: Path) -> None:
+    state_root = resolve_state_root(registry_dir)
+    for path in paths:
+        try:
+            remove_if_present(path, state_root)
+        except BackendError:
+            continue
+
+
+def remove_if_present(path: Path, state_root: Path) -> None:
+    resolved_path = validate_managed_path(path, state_root)
+    remove_resolved_if_present(resolved_path)
+
+
+def remove_resolved_if_present(resolved_path: Path) -> None:
     try:
-        path.unlink()
+        resolved_path.unlink()
     except FileNotFoundError:
         return
     except OSError as exc:
-        raise BackendError(f"failed to remove managed AppImage file {path}: {exc}") from exc
+        raise BackendError(f"failed to remove managed AppImage file {resolved_path}: {exc}") from exc
 
+
+def validate_managed_path(path: Path, state_root: Path) -> Path:
+    resolved_path = resolve_managed_path(path)
+    if not is_inside_state_root(resolved_path, state_root):
+        raise BackendError(f"managed AppImage path is outside resolver state: {path}")
+    return resolved_path
+
+
+def resolve_managed_path(path: Path) -> Path:
+    return path.resolve(strict=False)
+
+
+def is_inside_state_root(path: Path, state_root: Path) -> bool:
+    resolved_state_root = state_root.resolve(strict=False)
+    return path == resolved_state_root or path.is_relative_to(resolved_state_root)
