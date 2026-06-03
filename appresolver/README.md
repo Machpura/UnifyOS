@@ -123,6 +123,22 @@ python -m appresolver create-environment ubuntu-24.04-default --execute
 python -m appresolver create-environment ubuntu-24.04-default --execute --json
 ```
 
+Destroy a created environment runtime. Without `--execute`, this prints the planned cleanup and does not call Podman or mutate state:
+
+```bash
+python -m appresolver destroy-environment ubuntu-24.04-default
+python -m appresolver --json destroy-environment ubuntu-24.04-default
+```
+
+Execute the planned cleanup and mark the environment definition back to `defined` only after `podman rm` succeeds:
+
+```bash
+python -m appresolver destroy-environment ubuntu-24.04-default --execute
+python -m appresolver destroy-environment ubuntu-24.04-default --execute --json
+```
+
+`destroy-environment` removes only the runtime container. It does not delete the environment definition.
+
 Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not install packages inside containers, export apps from containers, or remove containers during failure cleanup in v0.
 
 Show stored permissions:
@@ -166,6 +182,7 @@ Included:
 - environment definition manifests
 - Podman environment command planning
 - explicit Podman environment creation with `--execute`
+- explicit Podman environment runtime cleanup with `destroy-environment --execute`
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
