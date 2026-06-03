@@ -20,6 +20,7 @@ from appresolver.backends.flatpak import install_flatpak, uninstall_flatpak
 from appresolver.backends.podman import (
     PodmanPlan,
     execute_plan,
+    inspect_environment_runtime,
     plan_destroy_environment,
     plan_environment,
     plan_start_environment,
@@ -200,6 +201,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="print structured JSON output",
     )
 
+    inspect_environment_parser = subparsers.add_parser(
+        "inspect-environment", help="compare an environment manifest with Podman runtime state"
+    )
+    inspect_environment_parser.add_argument("environment_id")
+    inspect_environment_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
+    reconcile_environment_parser = subparsers.add_parser(
+        "reconcile-environment", help="repair environment manifest status from Podman runtime state"
+    )
+    reconcile_environment_parser.add_argument("environment_id")
+    reconcile_environment_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="update the manifest status to match inspected runtime state",
+    )
+    reconcile_environment_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
     list_parser = subparsers.add_parser("list", help="list resolver-managed apps")
     list_parser.add_argument(
         "--json",
@@ -284,6 +314,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "stop-environment":
             return command_stop_environment(
+                environment_registry,
+                args.environment_id,
+                args.execute,
+                args.json_output,
+            )
+        if args.command == "inspect-environment":
+            return command_inspect_environment(environment_registry, args.environment_id, args.json_output)
+        if args.command == "reconcile-environment":
+            return command_reconcile_environment(
                 environment_registry,
                 args.environment_id,
                 args.execute,
@@ -590,6 +629,78 @@ def command_stop_environment(
     return 0
 
 
+def command_inspect_environment(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    result = environment_inspection_result(manifest)
+
+    if as_json:
+        print_json(result)
+        return 0
+
+    print_environment_inspection(result)
+    return 0
+
+
+def command_reconcile_environment(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    result = environment_inspection_result(manifest)
+    suggested_status = result["suggested_status"]
+    if not isinstance(suggested_status, str):
+        raise AppResolverError(
+            f"cannot reconcile environment '{manifest.environment_id}' because runtime status is "
+            f"'{result['runtime_status']}'"
+        )
+
+    if not execute:
+        output = {**result, "executed": False}
+        if as_json:
+            print_json(output)
+            return 0
+
+        print_environment_inspection(result)
+        print(f"Proposed manifest status: {suggested_status}")
+        print("Execution not performed. Re-run with --execute to update the manifest.")
+        return 0
+
+    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"reconcile environment {manifest.environment_id}")
+    previous_status = manifest.status
+    if previous_status != suggested_status:
+        reconciled_manifest = replace(manifest, status=suggested_status)
+        try:
+            environment_registry.update(reconciled_manifest)
+        except AppResolverError as exc:
+            raise AppResolverError(
+                "environment runtime state was inspected but registry update failed "
+                f"for '{manifest.environment_id}': {exc}"
+            ) from exc
+
+    output = {
+        "environment_id": manifest.environment_id,
+        "previous_status": previous_status,
+        "runtime_status": result["runtime_status"],
+        "new_status": suggested_status,
+        "executed": True,
+    }
+    if as_json:
+        print_json(output)
+        return 0
+
+    if previous_status == suggested_status:
+        print(f"Environment {manifest.environment_id} is already consistent")
+    else:
+        print(f"Reconciled environment {manifest.environment_id}: {previous_status} -> {suggested_status}")
+    return 0
+
+
 def command_import_appimage(registry: AppRegistry, state_paths: StatePaths, source_path: Path, dry_run: bool) -> int:
     resolved_source = validate_source_path(source_path)
     app_id = derive_app_id(resolved_source)
@@ -720,6 +831,43 @@ def environment_runtime_result(plan: PodmanPlan, status: str, executed: bool) ->
         "executed": executed,
         "actions": [action.to_dict() for action in plan.actions],
     }
+
+
+def environment_inspection_result(manifest: EnvironmentManifest) -> dict[str, object]:
+    inspection = inspect_environment_runtime(manifest)
+    suggested_status = suggested_manifest_status(manifest.status, inspection.runtime_status)
+    consistent = suggested_status == manifest.status
+    return {
+        "environment_id": manifest.environment_id,
+        "manifest_status": manifest.status,
+        "runtime_status": inspection.runtime_status,
+        "consistent": consistent,
+        "suggested_status": suggested_status,
+    }
+
+
+def suggested_manifest_status(manifest_status: str, runtime_status: str) -> str | None:
+    if runtime_status == "running":
+        return "running"
+    if runtime_status == "stopped":
+        return "stopped"
+    if runtime_status == "missing":
+        if manifest_status in {"created", "running", "stopped"}:
+            return "defined"
+        if manifest_status == "defined":
+            return "defined"
+    return None
+
+
+def print_environment_inspection(result: dict[str, object]) -> None:
+    print(f"Environment {result['environment_id']}:")
+    print(f"Manifest status: {result['manifest_status']}")
+    print(f"Runtime status: {result['runtime_status']}")
+    print(f"Consistent: {str(result['consistent']).lower()}")
+    if result["suggested_status"] is not None:
+        print(f"Suggested status: {result['suggested_status']}")
+    else:
+        print("Suggested status: unknown")
 
 
 def print_json(value: Any) -> None:

@@ -2093,3 +2093,405 @@ def test_stop_environment_global_json_execute_output(
     assert output["status"] == "stopped"
     assert output["executed"] is True
     assert output["actions"][0]["command"] == ["podman", "stop", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_inspect_environment_detects_running_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Manifest status: created" in output
+    assert "Runtime status: running" in output
+    assert "Suggested status: running" in output
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_inspect_environment_detects_stopped_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": false, "Status": "exited"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Runtime status: stopped" in output
+    assert "Suggested status: stopped" in output
+
+
+def test_inspect_environment_treats_no_such_container_as_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Runtime status: missing" in output
+    assert "Suggested status: defined" in output
+
+
+def test_inspect_environment_global_json_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "inspect-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "manifest_status": "created",
+        "runtime_status": "missing",
+        "consistent": False,
+        "suggested_status": "defined",
+    }
+
+
+def test_inspect_environment_subcommand_json_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["consistent"] is True
+    assert output["suggested_status"] == "running"
+
+
+def test_reconcile_environment_plan_only_proposes_correction_without_mutating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Proposed manifest status: defined" in output
+    assert "Execution not performed. Re-run with --execute to update the manifest." in output
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_reconcile_environment_execute_updates_manifest_status_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    manifest = environment_registry.load("ubuntu-24.04-default")
+    assert exit_code == 0
+    assert manifest.status == "running"
+    assert manifest.name == "ubuntu-24.04-default"
+    assert "Reconciled environment ubuntu-24.04-default: created -> running" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("manifest_status", ["created", "running", "stopped"])
+def test_reconcile_environment_missing_runtime_maps_active_statuses_to_defined(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, manifest_status: str
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status=manifest_status)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert environment_registry.load("ubuntu-24.04-default").status == "defined"
+
+
+def test_reconcile_environment_running_runtime_maps_manifest_to_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="stopped")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert environment_registry.load("ubuntu-24.04-default").status == "running"
+
+
+def test_reconcile_environment_stopped_runtime_maps_manifest_to_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": false, "Status": "created"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert environment_registry.load("ubuntu-24.04-default").status == "stopped"
+
+
+def test_reconcile_environment_already_consistent_does_not_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true}}]',
+            stderr="",
+        )
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise AssertionError("already-consistent reconcile must not update")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert "already consistent" in capsys.readouterr().out
+    assert environment_registry.load("ubuntu-24.04-default").status == "running"
+
+
+def test_reconcile_environment_global_json_plan_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "reconcile-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "manifest_status": "created",
+        "runtime_status": "missing",
+        "consistent": False,
+        "suggested_status": "defined",
+        "executed": False,
+    }
+
+
+def test_reconcile_environment_subcommand_json_execute_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "reconcile-environment",
+            "ubuntu-24.04-default",
+            "--execute",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "previous_status": "created",
+        "runtime_status": "missing",
+        "new_status": "defined",
+        "executed": True,
+    }
+
+
+def test_inspect_environment_non_container_backend_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, environment_id="flatpak-env", backend="flatpak", image="runtime")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "flatpak-env"])
+
+    assert exit_code == 1
+
+
+def test_inspect_environment_missing_environment_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "inspect-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_reconcile_environment_non_container_backend_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, environment_id="flatpak-env", backend="flatpak", image="runtime")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "reconcile-environment", "flatpak-env"])
+
+    assert exit_code == 1
+
+
+def test_reconcile_environment_missing_environment_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "reconcile-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_reconcile_environment_unexpected_inspect_failure_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("podman permission denied")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_reconcile_environment_manifest_update_failure_fails_clearly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true}}]',
+            stderr="",
+        )
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise RegistryError("registry blocked")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert "runtime state was inspected but registry update failed" in stderr
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"

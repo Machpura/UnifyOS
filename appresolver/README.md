@@ -175,6 +175,29 @@ defined -> created -> running -> stopped -> running
 created/stopped -> destroyed -> defined
 ```
 
+Inspect resolver state against Podman runtime state:
+
+```bash
+python -m appresolver inspect-environment ubuntu-24.04-default
+python -m appresolver --json inspect-environment ubuntu-24.04-default
+```
+
+Plan a manifest repair when resolver state and Podman runtime state diverge:
+
+```bash
+python -m appresolver reconcile-environment ubuntu-24.04-default
+python -m appresolver --json reconcile-environment ubuntu-24.04-default
+```
+
+Apply the manifest repair:
+
+```bash
+python -m appresolver reconcile-environment ubuntu-24.04-default --execute
+python -m appresolver reconcile-environment ubuntu-24.04-default --execute --json
+```
+
+`reconcile-environment` only updates the manifest status to match inspected runtime state. It does not create, remove, start, or stop containers. Use it to repair registry/runtime divergence after interrupted operations or manual Podman changes.
+
 Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not install packages inside containers, export apps from containers, or remove containers during failure cleanup in v0.
 
 Show stored permissions:
@@ -220,6 +243,7 @@ Included:
 - explicit Podman environment creation with `--execute`
 - explicit Podman environment start/stop lifecycle with `--execute`
 - explicit Podman environment runtime cleanup with `destroy-environment --execute`
+- Podman runtime state inspection and manifest reconciliation
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 

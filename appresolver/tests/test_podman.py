@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from appresolver.backends import podman
 from appresolver.backends.podman import (
     execute_plan,
+    inspect_environment_runtime,
     plan_destroy_environment,
     plan_environment,
     plan_start_environment,
     plan_stop_environment,
 )
 from appresolver.environment import EnvironmentManifest
-from appresolver.errors import BackendError
+from appresolver.errors import BackendError, CommandExecutionError
 
 
 def make_environment_manifest(
@@ -180,3 +183,73 @@ def test_execute_plan_calls_central_runner_with_planned_commands(monkeypatch: py
     execute_plan(plan)
 
     assert calls == [action.command for action in plan.actions]
+
+
+def test_inspect_environment_runtime_detects_running_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    inspection = inspect_environment_runtime(make_environment_manifest(status="created"))
+
+    assert inspection.runtime_status == "running"
+
+
+def test_inspect_environment_runtime_detects_stopped_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": false, "Status": "exited"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    inspection = inspect_environment_runtime(make_environment_manifest(status="running"))
+
+    assert inspection.runtime_status == "stopped"
+
+
+def test_inspect_environment_runtime_treats_no_such_container_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("Error: no such container appresolver-env-ubuntu-24.04-default")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    inspection = inspect_environment_runtime(make_environment_manifest(status="created"))
+
+    assert inspection.runtime_status == "missing"
+
+
+def test_inspect_environment_runtime_rejects_unexpected_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("permission denied")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    with pytest.raises(CommandExecutionError, match="permission denied"):
+        inspect_environment_runtime(make_environment_manifest(status="created"))
+
+
+def test_inspect_environment_runtime_rejects_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="{", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    with pytest.raises(BackendError, match="invalid JSON"):
+        inspect_environment_runtime(make_environment_manifest(status="created"))
+
+
+def test_inspect_environment_runtime_rejects_non_container_backend() -> None:
+    with pytest.raises(BackendError, match="backend 'container'"):
+        inspect_environment_runtime(make_environment_manifest(backend="flatpak", status="created"))
