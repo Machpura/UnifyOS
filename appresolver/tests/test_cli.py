@@ -10,6 +10,7 @@ from pytest import CaptureFixture
 from appresolver.backends.appimage import appimages_dir_for_registry, launcher_path, launchers_dir_for_registry, managed_appimage_path
 from appresolver.backends import flatpak
 from appresolver.cli import main
+from appresolver.environment import EnvironmentManifest
 from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import CommandExecutionError, RegistryError
 from appresolver.manifest import AppManifest
@@ -964,3 +965,143 @@ def test_delete_environment_refuses_symlink_resolving_outside_environments_dir(t
     assert exit_code == 1
     assert outside_file.exists()
     assert (environments_dir / "ubuntu-24.04-default.json").exists()
+
+
+def test_plan_environment_human_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "plan-environment", "ubuntu-24.04-default"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == "\n".join(
+        [
+            "Planned Podman actions for ubuntu-24.04-default:",
+            "podman pull ubuntu:24.04",
+            (
+                "podman create --name appresolver-env-ubuntu-24.04-default "
+                "--label appresolver.environment_id=ubuntu-24.04-default "
+                "ubuntu:24.04 sleep infinity"
+            ),
+            "",
+        ]
+    )
+
+
+def test_plan_environment_global_json_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "plan-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "backend": "podman",
+        "actions": [
+            {
+                "id": "pull-image",
+                "description": "Pull container image",
+                "command": ["podman", "pull", "ubuntu:24.04"],
+            },
+            {
+                "id": "create-container",
+                "description": "Create managed environment container",
+                "command": [
+                    "podman",
+                    "create",
+                    "--name",
+                    "appresolver-env-ubuntu-24.04-default",
+                    "--label",
+                    "appresolver.environment_id=ubuntu-24.04-default",
+                    "ubuntu:24.04",
+                    "sleep",
+                    "infinity",
+                ],
+            },
+        ],
+    }
+
+
+def test_plan_environment_subcommand_json_output(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "define-environment",
+            "ubuntu-24.04-default",
+            "--name",
+            "Ubuntu 24.04 Default",
+            "--backend",
+            "container",
+            "--image",
+            "ubuntu:24.04",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["--registry-dir", str(registry_dir), "plan-environment", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["actions"][0]["command"] == ["podman", "pull", "ubuntu:24.04"]
+
+
+def test_plan_environment_missing_environment_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "plan-environment", "missing-env"])
+
+    assert exit_code == 1
+
+
+def test_plan_environment_non_container_backend_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = EnvironmentRegistry(StatePaths.from_registry_dir(registry_dir).environments_dir)
+    environment_registry.save(
+        EnvironmentManifest(
+            environment_id="flatpak-env",
+            name="Flatpak Env",
+            backend="flatpak",
+            image="runtime",
+            status="defined",
+            created_at="2026-06-03T12:00:00+00:00",
+            permissions={},
+            apps=[],
+            source={"type": "manual"},
+        )
+    )
+
+    exit_code = main(["--registry-dir", str(registry_dir), "plan-environment", "flatpak-env"])
+
+    assert exit_code == 1

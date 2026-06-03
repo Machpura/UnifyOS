@@ -102,6 +102,13 @@ python -m appresolver delete-environment ubuntu-24.04-default
 python -m appresolver --dry-run delete-environment ubuntu-24.04-default
 ```
 
+Plan the Podman commands for a defined container environment without running them:
+
+```bash
+python -m appresolver plan-environment ubuntu-24.04-default
+python -m appresolver --json plan-environment ubuntu-24.04-default
+```
+
 Environment definitions are stored in `./.appresolver/environments/`. These commands only manage definition manifests; they do not create containers, call Podman, install packages, or start runtime environments.
 
 Show stored permissions:
@@ -143,6 +150,7 @@ Included:
 - Flatpak install, permissions, list, and uninstall commands
 - managed AppImage import and uninstall
 - environment definition manifests
+- Podman environment command planning without execution
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
@@ -157,4 +165,5 @@ Not included:
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
 - container creation or package installation
+- Podman execution or availability checks
 - permission enforcement beyond Flatpak-reported permission readout
