@@ -25,3 +25,7 @@ class BackendError(AppResolverError):
 class CommandExecutionError(BackendError):
     """Raised when an external command exits unsuccessfully."""
 
+
+class RuntimeActionBlocked(AppResolverError):
+    """Raised when runtime mutation is attempted in plan-only mode."""
+
