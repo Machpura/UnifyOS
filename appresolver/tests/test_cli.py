@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
+from appresolver.backends.appimage import launcher_path, managed_appimage_path
 from appresolver.backends import flatpak
 from appresolver.cli import main
 from appresolver.errors import CommandExecutionError
@@ -24,6 +25,29 @@ def make_manifest(app_id: str = "com.example.App") -> AppManifest:
         trust_tier="community",
         installed_at="2026-06-03T12:00:00+00:00",
     )
+
+
+def make_appimage_manifest(registry_dir: Path, app_id: str = "Example") -> AppManifest:
+    return AppManifest(
+        app_id=app_id,
+        name=app_id,
+        backend="appimage",
+        source={
+            "type": "appimage",
+            "original_path": str(registry_dir.parent / "source" / f"{app_id}.AppImage"),
+            "managed_path": str(managed_appimage_path(registry_dir, app_id)),
+            "launcher_path": str(launcher_path(registry_dir, app_id)),
+        },
+        permissions={"appimage": {"sandboxed": False, "executed_during_import": False}},
+        trust_tier="unverified",
+        installed_at="2026-06-03T12:00:00+00:00",
+    )
+
+
+def write_appimage(path: Path, content: str = "#!/bin/sh\nexit 0\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def test_global_json_flag_before_list_outputs_json_array(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -206,3 +230,125 @@ def test_uninstall_does_not_delete_manifest_when_flatpak_uninstall_fails(
 
     assert exit_code == 1
     assert (tmp_path / "com.discordapp.Discord.json").exists()
+
+
+def test_import_appimage_writes_managed_file_launcher_and_manifest(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+
+    assert exit_code == 0
+    assert managed_appimage_path(registry_dir, "Example").exists()
+    assert launcher_path(registry_dir, "Example").exists()
+    assert AppRegistry(registry_dir).load("Example").backend == "appimage"
+    assert capsys.readouterr().out.startswith("Imported Example as managed AppImage\n")
+
+
+def test_dry_run_import_appimage_mutates_nothing(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--dry-run", "import-appimage", str(source_path)])
+
+    assert exit_code == 0
+    assert not registry_dir.exists()
+    assert not managed_appimage_path(registry_dir, "Example").exists()
+    assert not launcher_path(registry_dir, "Example").exists()
+    assert "Would copy:" in capsys.readouterr().out
+
+
+def test_subcommand_dry_run_import_appimage_mutates_nothing(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path), "--dry-run"])
+
+    assert exit_code == 0
+    assert not registry_dir.exists()
+    assert "Would write manifest:" in capsys.readouterr().out
+
+
+def test_import_appimage_duplicate_app_id_does_not_overwrite_managed_file(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage", "new")
+    managed_path = managed_appimage_path(registry_dir, "Example")
+    managed_path.parent.mkdir(parents=True)
+    managed_path.write_text("existing", encoding="utf-8")
+    AppRegistry(registry_dir).save(make_appimage_manifest(registry_dir, "Example"))
+
+    exit_code = main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+
+    assert exit_code == 1
+    assert managed_path.read_text(encoding="utf-8") == "existing"
+
+
+def test_uninstall_appimage_removes_managed_file_launcher_and_manifest(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+    main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+
+    exit_code = main(["--registry-dir", str(registry_dir), "uninstall", "Example"])
+
+    assert exit_code == 0
+    assert not managed_appimage_path(registry_dir, "Example").exists()
+    assert not launcher_path(registry_dir, "Example").exists()
+    assert not AppRegistry(registry_dir).exists("Example")
+
+
+def test_uninstall_appimage_tolerates_missing_managed_files_and_deletes_manifest(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    registry = AppRegistry(registry_dir)
+    registry.save(make_appimage_manifest(registry_dir, "Example"))
+
+    exit_code = main(["--registry-dir", str(registry_dir), "uninstall", "Example"])
+
+    assert exit_code == 0
+    assert not registry.exists("Example")
+
+
+def test_dry_run_uninstall_appimage_mutates_nothing(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    registry = AppRegistry(registry_dir)
+    manifest = make_appimage_manifest(registry_dir, "Example")
+    registry.save(manifest)
+    managed_path = Path(str(manifest.source["managed_path"]))
+    desktop_path = Path(str(manifest.source["launcher_path"]))
+    managed_path.parent.mkdir(parents=True)
+    desktop_path.parent.mkdir(parents=True)
+    managed_path.write_text("appimage", encoding="utf-8")
+    desktop_path.write_text("launcher", encoding="utf-8")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--dry-run", "uninstall", "Example"])
+
+    assert exit_code == 0
+    assert managed_path.exists()
+    assert desktop_path.exists()
+    assert registry.exists("Example")
+    assert "Would remove managed AppImage:" in capsys.readouterr().out
+
+
+def test_uninstall_appimage_file_removal_failure_keeps_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+    main(["--registry-dir", str(registry_dir), "import-appimage", str(source_path)])
+    desktop_path = launcher_path(registry_dir, "Example")
+    original_unlink = Path.unlink
+
+    def failing_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == desktop_path:
+            raise OSError("blocked")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "uninstall", "Example"])
+
+    assert exit_code == 1
+    assert AppRegistry(registry_dir).exists("Example")

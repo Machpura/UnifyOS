@@ -6,7 +6,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from appresolver.backends.flatpak import install_flatpak, read_flatpak_permissions, uninstall_flatpak
+from appresolver.backends.appimage import (
+    derive_app_id,
+    import_appimage,
+    launcher_path,
+    managed_appimage_path,
+    uninstall_appimage,
+    validate_source_path,
+)
+from appresolver.backends.flatpak import install_flatpak, uninstall_flatpak
 from appresolver.errors import AppResolverError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry, default_registry_dir, validate_app_id
@@ -37,6 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser = subparsers.add_parser("install-flatpak", help="install a Flatpak app by app ID")
     install_parser.add_argument("app_id")
     install_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print planned actions without changing state",
+    )
+
+    import_appimage_parser = subparsers.add_parser("import-appimage", help="import an AppImage into managed storage")
+    import_appimage_parser.add_argument("path", type=Path)
+    import_appimage_parser.add_argument(
         "--dry-run",
         dest="dry_run",
         action="store_true",
@@ -84,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "install-flatpak":
             return command_install_flatpak(registry, args.app_id, args.dry_run)
+        if args.command == "import-appimage":
+            return command_import_appimage(registry, args.path, args.dry_run)
         if args.command == "list":
             return command_list(registry, args.json_output)
         if args.command == "permissions":
@@ -109,6 +129,28 @@ def command_install_flatpak(registry: AppRegistry, app_id: str, dry_run: bool) -
     manifest = install_flatpak(app_id)
     registry.save(manifest)
     print(f"Installed {app_id} via Flatpak")
+    print(f"Manifest: {registry.path_for(app_id)}")
+    return 0
+
+
+def command_import_appimage(registry: AppRegistry, source_path: Path, dry_run: bool) -> int:
+    resolved_source = validate_source_path(source_path)
+    app_id = derive_app_id(resolved_source)
+    if registry.exists(app_id):
+        raise AppResolverError(f"app '{app_id}' is already managed by App Resolver")
+
+    managed_path = managed_appimage_path(registry.registry_dir, app_id)
+    desktop_path = launcher_path(registry.registry_dir, app_id)
+    if dry_run:
+        print(f"Would copy: {resolved_source} -> {managed_path}")
+        print(f"Would chmod executable: {managed_path}")
+        print(f"Would write launcher: {desktop_path}")
+        print(f"Would write manifest: {registry.path_for(app_id)}")
+        return 0
+
+    manifest = import_appimage(resolved_source, registry.registry_dir)
+    registry.save(manifest)
+    print(f"Imported {app_id} as managed AppImage")
     print(f"Manifest: {registry.path_for(app_id)}")
     return 0
 
@@ -142,18 +184,34 @@ def command_permissions(registry: AppRegistry, app_id: str, as_json: bool) -> in
 def command_uninstall(registry: AppRegistry, app_id: str, dry_run: bool) -> int:
     validate_app_id(app_id)
     manifest = registry.load(app_id)
-    if manifest.backend != "flatpak":
-        raise AppResolverError(f"unsupported backend for uninstall in v0: {manifest.backend}")
 
     if dry_run:
-        print(f"Would run: flatpak uninstall -y {app_id}")
-        print(f"Would delete manifest: {registry.path_for(app_id)}")
+        print_uninstall_plan(registry, manifest)
         return 0
 
-    uninstall_flatpak(app_id)
+    if manifest.backend == "flatpak":
+        uninstall_flatpak(app_id)
+    elif manifest.backend == "appimage":
+        uninstall_appimage(manifest)
+    else:
+        raise AppResolverError(f"unsupported backend for uninstall in v0: {manifest.backend}")
+
     registry.delete(app_id)
     print(f"Uninstalled {app_id}")
     return 0
+
+
+def print_uninstall_plan(registry: AppRegistry, manifest: AppManifest) -> None:
+    if manifest.backend == "flatpak":
+        print(f"Would run: flatpak uninstall -y {manifest.app_id}")
+    elif manifest.backend == "appimage":
+        managed_path = manifest.source.get("managed_path")
+        desktop_path = manifest.source.get("launcher_path")
+        print(f"Would remove managed AppImage: {managed_path}")
+        print(f"Would remove launcher: {desktop_path}")
+    else:
+        raise AppResolverError(f"unsupported backend for uninstall in v0: {manifest.backend}")
+    print(f"Would delete manifest: {registry.path_for(manifest.app_id)}")
 
 
 def manifest_summary(manifest: AppManifest) -> dict[str, object]:
