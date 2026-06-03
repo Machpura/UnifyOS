@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appresolver"
+version = "0.1.0"
+description = "App Resolver v0 CLI prototype"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "ProjectOS" }
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8"
+]
+
+[project.scripts]
+appresolver = "appresolver.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
