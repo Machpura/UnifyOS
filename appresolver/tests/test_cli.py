@@ -15,6 +15,7 @@ from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import CommandExecutionError, RegistryError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry
+from appresolver.services import desktop_integration
 from appresolver.state import StatePaths
 
 
@@ -448,6 +449,134 @@ def test_open_shell_script_execute_refuses_clearly(tmp_path: Path, capsys: Captu
     assert exit_code == 1
     assert "shell scripts are unsafe" in capsys.readouterr().err
     assert not registry_dir.parent.exists()
+
+
+def test_install_desktop_integration_plan_mutates_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+
+    exit_code = main(["install-desktop-integration"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Status: planned-install" in output
+    assert "Executed: false" in output
+    assert "Files to write:" in output
+    assert not data_home.exists()
+
+
+def test_install_desktop_integration_execute_writes_user_local_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setattr(desktop_integration.shutil, "which", lambda name: None)
+
+    exit_code = main(["install-desktop-integration", "--execute"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Status: installed" in output
+    assert "Warnings:" in output
+    assert (data_home / "applications" / "appresolver-open.desktop").exists()
+    assert (data_home / "mime" / "packages" / "appresolver-open.xml").exists()
+
+
+def test_remove_desktop_integration_execute_removes_generated_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    desktop_file = data_home / "applications" / "appresolver-open.desktop"
+    mime_file = data_home / "mime" / "packages" / "appresolver-open.xml"
+    desktop_file.parent.mkdir(parents=True)
+    mime_file.parent.mkdir(parents=True)
+    desktop_file.write_text(desktop_integration.desktop_file_contents(), encoding="utf-8")
+    mime_file.write_text(desktop_integration.mime_xml_contents(), encoding="utf-8")
+    monkeypatch.setattr(desktop_integration.shutil, "which", lambda name: None)
+
+    exit_code = main(["remove-desktop-integration", "--execute"])
+
+    assert exit_code == 0
+    assert "Status: removed" in capsys.readouterr().out
+    assert not desktop_file.exists()
+    assert not mime_file.exists()
+
+
+def test_install_desktop_integration_json_before_and_after_subcommand(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    global_data_home = tmp_path / "global-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(global_data_home))
+
+    global_exit_code = main(["--json", "install-desktop-integration"])
+
+    assert global_exit_code == 0
+    global_output = json.loads(capsys.readouterr().out)
+    assert global_output["status"] == "planned-install"
+    assert global_output["executed"] is False
+
+    subcommand_data_home = tmp_path / "subcommand-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(subcommand_data_home))
+
+    subcommand_exit_code = main(["install-desktop-integration", "--json"])
+
+    assert subcommand_exit_code == 0
+    subcommand_output = json.loads(capsys.readouterr().out)
+    assert subcommand_output["status"] == "planned-install"
+    assert subcommand_output["executed"] is False
+
+
+def test_remove_desktop_integration_json_before_and_after_subcommand(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    global_data_home = tmp_path / "global-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(global_data_home))
+
+    global_exit_code = main(["--json", "remove-desktop-integration"])
+
+    assert global_exit_code == 0
+    global_output = json.loads(capsys.readouterr().out)
+    assert global_output["status"] == "planned-remove"
+    assert global_output["executed"] is False
+
+    subcommand_data_home = tmp_path / "subcommand-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(subcommand_data_home))
+
+    subcommand_exit_code = main(["remove-desktop-integration", "--json"])
+
+    assert subcommand_exit_code == 0
+    subcommand_output = json.loads(capsys.readouterr().out)
+    assert subcommand_output["status"] == "planned-remove"
+    assert subcommand_output["executed"] is False
+
+
+def test_desktop_integration_execute_json_outputs_structured_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setattr(desktop_integration.shutil, "which", lambda name: None)
+
+    install_exit_code = main(["--json", "install-desktop-integration", "--execute"])
+
+    assert install_exit_code == 0
+    install_output = json.loads(capsys.readouterr().out)
+    assert install_output["status"] == "installed"
+    assert install_output["executed"] is True
+    assert len(install_output["files_written"]) == 2
+    assert len(install_output["warnings"]) == 2
+
+    remove_exit_code = main(["remove-desktop-integration", "--execute", "--json"])
+
+    assert remove_exit_code == 0
+    remove_output = json.loads(capsys.readouterr().out)
+    assert remove_output["status"] == "removed"
+    assert remove_output["executed"] is True
+    assert len(remove_output["files_removed"]) == 2
+    assert len(remove_output["warnings"]) == 2
 
 
 def test_import_appimage_duplicate_app_id_does_not_overwrite_managed_file(tmp_path: Path) -> None:

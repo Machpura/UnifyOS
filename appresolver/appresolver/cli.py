@@ -26,6 +26,7 @@ from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import AppResolverError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry, default_registry_dir, validate_app_id
+from appresolver.services import desktop_integration as desktop_integration_services
 from appresolver.services import environments as environment_services
 from appresolver.services import files as file_services
 from appresolver.services import packages as package_services
@@ -83,6 +84,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="execute the supported route",
     )
     open_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
+    install_desktop_integration_parser = subparsers.add_parser(
+        "install-desktop-integration", help="install user-local Open With integration for App Resolver"
+    )
+    install_desktop_integration_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="write user-local desktop and MIME integration files",
+    )
+    install_desktop_integration_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
+    remove_desktop_integration_parser = subparsers.add_parser(
+        "remove-desktop-integration", help="remove user-local Open With integration for App Resolver"
+    )
+    remove_desktop_integration_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="remove user-local desktop and MIME integration files",
+    )
+    remove_desktop_integration_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -349,6 +382,10 @@ def main(argv: list[str] | None = None) -> int:
             return command_import_appimage(registry, state_paths, args.path, args.dry_run)
         if args.command == "open":
             return command_open(registry, state_paths, args.path, args.execute, args.json_output)
+        if args.command == "install-desktop-integration":
+            return command_install_desktop_integration(args.execute, args.json_output)
+        if args.command == "remove-desktop-integration":
+            return command_remove_desktop_integration(args.execute, args.json_output)
         if args.command == "define-environment":
             return command_define_environment(
                 environment_registry,
@@ -828,6 +865,26 @@ def command_open(
     return 0
 
 
+def command_install_desktop_integration(execute: bool, as_json: bool) -> int:
+    result = desktop_integration_services.install_desktop_integration(execute)
+    if as_json:
+        print_json(result)
+        return 0
+
+    print_desktop_integration_result(result)
+    return 0
+
+
+def command_remove_desktop_integration(execute: bool, as_json: bool) -> int:
+    result = desktop_integration_services.remove_desktop_integration(execute)
+    if as_json:
+        print_json(result)
+        return 0
+
+    print_desktop_integration_result(result)
+    return 0
+
+
 def command_list(registry: AppRegistry, as_json: bool) -> int:
     manifests = registry.list()
     if as_json:
@@ -990,6 +1047,41 @@ def format_open_action(action: dict[str, object]) -> str:
     if "path" in action:
         return f"{description}: {action['path']}"
     return description
+
+
+def print_desktop_integration_result(result: dict[str, Any]) -> None:
+    print(f"Status: {result['status']}")
+    print(f"Executed: {str(result['executed']).lower()}")
+    for key, label in [
+        ("files_to_write", "Files to write"),
+        ("files_written", "Files written"),
+        ("files_to_remove", "Files to remove"),
+        ("files_removed", "Files removed"),
+    ]:
+        values = result.get(key)
+        if isinstance(values, list):
+            print(f"{label}:")
+            if values:
+                for value in values:
+                    print(f"- {value}")
+            else:
+                print("- none")
+
+    commands = result.get("commands_to_run", result.get("commands_run"))
+    if isinstance(commands, list):
+        print("Commands:")
+        if commands:
+            for command in commands:
+                if isinstance(command, list):
+                    print("- " + " ".join(str(part) for part in command))
+        else:
+            print("- none")
+
+    warnings = result.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
 
 
 def print_json(value: Any) -> None:

@@ -105,7 +105,25 @@ python -m appresolver open ~/Downloads/Example.AppImage --execute
 
 `open` currently imports `.AppImage` and `.appimage` files through the managed AppImage importer. It does not execute the AppImage and does not export launchers outside `./.appresolver/launchers/`.
 
-`.deb`, `.rpm`, `.exe`, and `.flatpakref` files are detected and reported with future routes, but direct execution/import is not implemented yet. Shell scripts are refused in normal mode. MIME association and double-click desktop integration are not implemented yet.
+`.deb`, `.rpm`, `.exe`, and `.flatpakref` files are detected and reported with future routes, but direct execution/import is not implemented yet. Shell scripts are refused in normal mode. Making App Resolver the default handler and full double-click installer behavior are not implemented yet.
+
+Install user-local desktop/MIME integration so App Resolver can appear as an "Open With" target:
+
+```bash
+python -m appresolver install-desktop-integration
+python -m appresolver install-desktop-integration --execute
+python -m appresolver --json install-desktop-integration
+```
+
+Remove the user-local desktop/MIME integration:
+
+```bash
+python -m appresolver remove-desktop-integration
+python -m appresolver remove-desktop-integration --execute
+python -m appresolver --json remove-desktop-integration
+```
+
+Desktop integration is user-local only. It writes `appresolver-open.desktop` under the user applications directory and `appresolver-open.xml` under the user MIME packages directory; it does not use root, sudo, or system-wide MIME/application paths. Desktop/file-manager behavior may vary, and App Resolver still uses the same `open PATH` plan/execute behavior after a file is opened.
 
 Define an environment record without creating runtime resources:
 
@@ -325,6 +343,7 @@ Included:
 - Flatpak install, permissions, list, and uninstall commands
 - managed AppImage import and uninstall
 - file-oriented `open PATH` detection and AppImage import routing
+- user-local desktop/MIME integration for App Resolver Open With routing
 - environment definition manifests
 - Podman environment command planning
 - explicit Podman environment creation with `--execute`
@@ -345,7 +364,7 @@ Not included:
 - AppImage execution during import
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
-- MIME associations and double-click desktop integration
+- system-wide MIME associations and desktop integration
 - direct `.deb`, `.rpm`, `.flatpakref`, or Windows installer execution
 - app export from containers
 - apt autoremove or purge
