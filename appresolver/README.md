@@ -198,7 +198,25 @@ python -m appresolver reconcile-environment ubuntu-24.04-default --execute --jso
 
 `reconcile-environment` only updates the manifest status to match inspected runtime state. It does not create, remove, start, or stop containers. Use it to repair registry/runtime divergence after interrupted operations or manual Podman changes.
 
-Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not install packages inside containers, export apps from containers, or remove containers during failure cleanup in v0.
+Install a native package inside an already-created managed container environment. Without `--execute`, this prints the planned Podman commands and does not call Podman or mutate state:
+
+```bash
+python -m appresolver install-package ubuntu-24.04-default curl
+python -m appresolver --json install-package ubuntu-24.04-default curl
+```
+
+Execute the planned install:
+
+```bash
+python -m appresolver install-package ubuntu-24.04-default curl --execute
+python -m appresolver install-package ubuntu-24.04-default curl --execute --json
+```
+
+Package installation currently supports apt-based `ubuntu:*` and `debian:*` images only. App Resolver runs `apt-get update` and `apt-get install -y PACKAGE` inside the managed container. Installed package state is not tracked in the manifest yet.
+
+If an environment is `created` or `stopped`, `install-package --execute` starts it first, updates the manifest status to `running`, and leaves it running for now.
+
+Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not export apps from containers or remove containers during failure cleanup in v0.
 
 Show stored permissions:
 
@@ -244,6 +262,7 @@ Included:
 - explicit Podman environment start/stop lifecycle with `--execute`
 - explicit Podman environment runtime cleanup with `destroy-environment --execute`
 - Podman runtime state inspection and manifest reconciliation
+- apt package installation inside ubuntu/debian managed containers
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
@@ -256,7 +275,6 @@ Not included:
 - AppImage execution during import
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
-- package installation inside containers
 - app export from containers
 - Podman availability checks
 - permission enforcement beyond Flatpak-reported permission readout

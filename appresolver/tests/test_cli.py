@@ -2597,3 +2597,352 @@ def test_reconcile_environment_manifest_update_failure_fails_clearly(
     assert exit_code == 1
     assert "runtime state was inspected but registry update failed" in stderr
     assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_install_package_plan_only_prints_actions_without_subprocess_or_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only install-package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Planned Podman actions for ubuntu-24.04-default:" in output
+    assert "podman start appresolver-env-ubuntu-24.04-default" in output
+    assert "podman exec appresolver-env-ubuntu-24.04-default apt-get update" in output
+    assert "Execution not performed. Re-run with --execute to install the package." in output
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+@pytest.mark.parametrize("status", ["created", "stopped"])
+def test_install_package_execute_starts_non_running_environment_then_installs_and_marks_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status=status)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ["podman", "start", "appresolver-env-ubuntu-24.04-default"],
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "update"],
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "install", "-y", "curl"],
+    ]
+    assert environment_registry.load("ubuntu-24.04-default").status == "running"
+
+
+def test_install_package_execute_running_environment_skips_start_and_does_not_change_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "update"],
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "install", "-y", "curl"],
+    ]
+    assert environment_registry.load("ubuntu-24.04-default").status == "running"
+
+
+def test_install_package_start_failure_prevents_apt_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        raise CommandExecutionError("start failed")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert calls == [["podman", "start", "appresolver-env-ubuntu-24.04-default"]]
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_install_package_apt_update_failure_prevents_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        raise CommandExecutionError("apt update failed")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert calls == [["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "update"]]
+
+
+def test_install_package_apt_install_failure_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[-2:] == ["-y", "curl"]:
+            raise CommandExecutionError("apt install failed")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert calls == [
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "update"],
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "install", "-y", "curl"],
+    ]
+
+
+def test_install_package_manifest_update_failure_after_start_warns_and_skips_apt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise RegistryError("registry blocked")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert calls == [["podman", "start", "appresolver-env-ubuntu-24.04-default"]]
+    assert "runtime may be running but registry update failed" in stderr
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+@pytest.mark.parametrize("package_name", ["bad package", "bad;package", "bad/package", "$(bad)", "`bad`"])
+def test_install_package_rejects_invalid_package_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, package_name: str
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("invalid package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", package_name])
+
+    assert exit_code == 1
+
+
+def test_install_package_invalid_status_does_not_call_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="defined")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("invalid status must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl"])
+
+    assert exit_code == 1
+
+
+def test_install_package_missing_environment_exits_nonzero(tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "missing-env", "curl"])
+
+    assert exit_code == 1
+
+
+def test_install_package_non_container_backend_exits_nonzero_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, environment_id="flatpak-env", backend="flatpak", image="runtime")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("non-container backend must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "flatpak-env", "curl"])
+
+    assert exit_code == 1
+
+
+def test_install_package_unsupported_image_exits_nonzero_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, image="fedora:latest", status="running")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("unsupported image must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl"])
+
+    assert exit_code == 1
+
+
+def test_global_json_install_package_plan_outputs_structured_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only JSON must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "--json", "install-package", "ubuntu-24.04-default", "curl"]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["environment_id"] == "ubuntu-24.04-default"
+    assert output["package"] == "curl"
+    assert output["package_manager"] == "apt"
+    assert output["status"] == "planned-install"
+    assert output["executed"] is False
+    assert [action["id"] for action in output["actions"]] == ["apt-update", "apt-install"]
+
+
+def test_subcommand_json_install_package_plan_outputs_structured_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only JSON must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "install-package", "ubuntu-24.04-default", "curl", "--json"]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "planned-install"
+    assert output["executed"] is False
+
+
+def test_global_json_install_package_execute_outputs_structured_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "--json",
+            "install-package",
+            "ubuntu-24.04-default",
+            "curl",
+            "--execute",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "installed"
+    assert output["executed"] is True
+
+
+def test_subcommand_json_install_package_execute_outputs_structured_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "install-package",
+            "ubuntu-24.04-default",
+            "curl",
+            "--execute",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "installed"
+    assert output["executed"] is True
+    assert [action["id"] for action in output["actions"]] == ["apt-update", "apt-install"]

@@ -18,11 +18,15 @@ from appresolver.backends.appimage import (
 )
 from appresolver.backends.flatpak import install_flatpak, uninstall_flatpak
 from appresolver.backends.podman import (
+    PackageInstallPlan,
     PodmanPlan,
+    PlannedAction,
+    execute_actions,
     execute_plan,
     inspect_environment_runtime,
     plan_destroy_environment,
     plan_environment,
+    plan_install_package,
     plan_start_environment,
     plan_stop_environment,
 )
@@ -230,6 +234,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="print structured JSON output",
     )
 
+    install_package_parser = subparsers.add_parser(
+        "install-package", help="install a native package inside a managed environment"
+    )
+    install_package_parser.add_argument("environment_id")
+    install_package_parser.add_argument("package_name")
+    install_package_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute planned Podman package install actions",
+    )
+    install_package_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
     list_parser = subparsers.add_parser("list", help="list resolver-managed apps")
     list_parser.add_argument(
         "--json",
@@ -325,6 +347,14 @@ def main(argv: list[str] | None = None) -> int:
             return command_reconcile_environment(
                 environment_registry,
                 args.environment_id,
+                args.execute,
+                args.json_output,
+            )
+        if args.command == "install-package":
+            return command_install_package(
+                environment_registry,
+                args.environment_id,
+                args.package_name,
                 args.execute,
                 args.json_output,
             )
@@ -708,6 +738,69 @@ def command_reconcile_environment(
     return 0
 
 
+def command_install_package(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    package_name: str,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    plan = plan_install_package(manifest, package_name)
+
+    if not execute:
+        if as_json:
+            print_json(package_install_result(plan, status="planned-install", executed=False))
+            return 0
+
+        print_package_install_plan(plan)
+        print("Execution not performed. Re-run with --execute to install the package.")
+        return 0
+
+    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(
+        f"install package {plan.package} in environment {manifest.environment_id}"
+    )
+    executed_actions = execute_package_install_plan(environment_registry, manifest, plan)
+
+    if as_json:
+        print_json(package_install_result(plan, status="installed", executed=True))
+        return 0
+
+    print(f"Installed package {plan.package} in environment {manifest.environment_id}")
+    print("Executed Podman actions:")
+    for action in executed_actions:
+        print(" ".join(action.command))
+    if manifest.status != "running":
+        print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    return 0
+
+
+def execute_package_install_plan(
+    environment_registry: EnvironmentRegistry,
+    manifest: EnvironmentManifest,
+    plan: PackageInstallPlan,
+) -> list[PlannedAction]:
+    start_actions = [action for action in plan.actions if action.id == "start-container"]
+    remaining_actions = [action for action in plan.actions if action.id != "start-container"]
+    executed_actions: list[PlannedAction] = []
+
+    if start_actions:
+        execute_actions(start_actions)
+        executed_actions.extend(start_actions)
+        running_manifest = replace(manifest, status="running")
+        try:
+            environment_registry.update(running_manifest)
+        except AppResolverError as exc:
+            raise AppResolverError(
+                "environment runtime may be running but registry update failed "
+                f"for '{manifest.environment_id}': {exc}"
+            ) from exc
+
+    execute_actions(remaining_actions)
+    executed_actions.extend(remaining_actions)
+    return executed_actions
+
+
 def command_import_appimage(registry: AppRegistry, state_paths: StatePaths, source_path: Path, dry_run: bool) -> int:
     resolved_source = validate_source_path(source_path)
     app_id = derive_app_id(resolved_source)
@@ -826,6 +919,12 @@ def print_plan(plan: PodmanPlan) -> None:
         print(" ".join(action.command))
 
 
+def print_package_install_plan(plan: PackageInstallPlan) -> None:
+    print(f"Planned Podman actions for {plan.environment_id}:")
+    for action in plan.actions:
+        print(" ".join(action.command))
+
+
 def create_environment_result(plan: PodmanPlan, status: str, executed: bool) -> dict[str, Any]:
     return environment_runtime_result(plan, status, executed)
 
@@ -834,6 +933,17 @@ def environment_runtime_result(plan: PodmanPlan, status: str, executed: bool) ->
     return {
         "environment_id": plan.environment_id,
         "backend": plan.backend,
+        "status": status,
+        "executed": executed,
+        "actions": [action.to_dict() for action in plan.actions],
+    }
+
+
+def package_install_result(plan: PackageInstallPlan, status: str, executed: bool) -> dict[str, Any]:
+    return {
+        "environment_id": plan.environment_id,
+        "package": plan.package,
+        "package_manager": plan.package_manager,
         "status": status,
         "executed": executed,
         "actions": [action.to_dict() for action in plan.actions],

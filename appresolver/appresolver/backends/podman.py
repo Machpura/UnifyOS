@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from appresolver.environment import EnvironmentManifest
 from appresolver.errors import BackendError, CommandExecutionError
 from appresolver.subprocess_runner import run_command
+
+
+PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]*$")
+PACKAGE_INSTALL_STATUSES = {"created", "running", "stopped"}
 
 
 @dataclass(frozen=True)
@@ -34,9 +39,29 @@ class PodmanPlan:
 
 
 @dataclass(frozen=True)
+class PackageInstallPlan:
+    environment_id: str
+    package: str
+    package_manager: str
+    actions: list[PlannedAction]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "environment_id": self.environment_id,
+            "package": self.package,
+            "package_manager": self.package_manager,
+            "actions": [action.to_dict() for action in self.actions],
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeInspection:
     environment_id: str
     runtime_status: str
+
+
+def container_name_for_environment(manifest: EnvironmentManifest) -> str:
+    return f"appresolver-env-{manifest.environment_id}"
 
 
 def plan_environment(manifest: EnvironmentManifest) -> PodmanPlan:
@@ -45,7 +70,7 @@ def plan_environment(manifest: EnvironmentManifest) -> PodmanPlan:
             f"Podman planning requires environment backend 'container', got '{manifest.backend}'"
         )
 
-    container_name = f"appresolver-env-{manifest.environment_id}"
+    container_name = container_name_for_environment(manifest)
     return PodmanPlan(
         environment_id=manifest.environment_id,
         backend="podman",
@@ -80,7 +105,7 @@ def plan_destroy_environment(manifest: EnvironmentManifest) -> PodmanPlan:
             f"Podman destroy planning requires environment backend 'container', got '{manifest.backend}'"
         )
 
-    container_name = f"appresolver-env-{manifest.environment_id}"
+    container_name = container_name_for_environment(manifest)
     return PodmanPlan(
         environment_id=manifest.environment_id,
         backend="podman",
@@ -100,7 +125,7 @@ def plan_start_environment(manifest: EnvironmentManifest) -> PodmanPlan:
             f"Podman start planning requires environment backend 'container', got '{manifest.backend}'"
         )
 
-    container_name = f"appresolver-env-{manifest.environment_id}"
+    container_name = container_name_for_environment(manifest)
     return PodmanPlan(
         environment_id=manifest.environment_id,
         backend="podman",
@@ -120,7 +145,7 @@ def plan_stop_environment(manifest: EnvironmentManifest) -> PodmanPlan:
             f"Podman stop planning requires environment backend 'container', got '{manifest.backend}'"
         )
 
-    container_name = f"appresolver-env-{manifest.environment_id}"
+    container_name = container_name_for_environment(manifest)
     return PodmanPlan(
         environment_id=manifest.environment_id,
         backend="podman",
@@ -134,13 +159,87 @@ def plan_stop_environment(manifest: EnvironmentManifest) -> PodmanPlan:
     )
 
 
+def plan_install_package(manifest: EnvironmentManifest, package_name: str) -> PackageInstallPlan:
+    if manifest.backend != "container":
+        raise BackendError(
+            f"Podman package install planning requires environment backend 'container', got '{manifest.backend}'"
+        )
+    if manifest.status not in PACKAGE_INSTALL_STATUSES:
+        raise BackendError(
+            f"environment '{manifest.environment_id}' status is '{manifest.status}'; "
+            "package install requires status 'created', 'running', or 'stopped'"
+        )
+
+    validate_package_name(package_name)
+    package_manager = detect_package_manager(manifest.image)
+    container_name = container_name_for_environment(manifest)
+    actions: list[PlannedAction] = []
+
+    if manifest.status != "running":
+        actions.append(
+            PlannedAction(
+                id="start-container",
+                description="Start managed environment container",
+                command=["podman", "start", container_name],
+            )
+        )
+
+    if package_manager == "apt":
+        actions.extend(
+            [
+                PlannedAction(
+                    id="apt-update",
+                    description="Update apt package metadata",
+                    command=["podman", "exec", container_name, "apt-get", "update"],
+                ),
+                PlannedAction(
+                    id="apt-install",
+                    description="Install package with apt",
+                    command=[
+                        "podman",
+                        "exec",
+                        container_name,
+                        "apt-get",
+                        "install",
+                        "-y",
+                        package_name,
+                    ],
+                ),
+            ]
+        )
+
+    return PackageInstallPlan(
+        environment_id=manifest.environment_id,
+        package=package_name,
+        package_manager=package_manager,
+        actions=actions,
+    )
+
+
+def validate_package_name(package_name: str) -> None:
+    if not PACKAGE_NAME_PATTERN.fullmatch(package_name):
+        raise BackendError(
+            f"invalid package name '{package_name}'; expected pattern "
+            r"^[A-Za-z0-9][A-Za-z0-9+._:-]*$"
+        )
+
+
+def detect_package_manager(image: str) -> str:
+    normalized = image.lower()
+    if normalized.startswith("ubuntu:") or normalized.startswith("debian:"):
+        return "apt"
+    raise BackendError(
+        f"unsupported package manager for image '{image}'; v0 supports apt for ubuntu:* and debian:* images"
+    )
+
+
 def inspect_environment_runtime(manifest: EnvironmentManifest) -> RuntimeInspection:
     if manifest.backend != "container":
         raise BackendError(
             f"Podman runtime inspection requires environment backend 'container', got '{manifest.backend}'"
         )
 
-    container_name = f"appresolver-env-{manifest.environment_id}"
+    container_name = container_name_for_environment(manifest)
     try:
         result = run_command(["podman", "inspect", container_name])
     except CommandExecutionError as exc:
@@ -200,6 +299,10 @@ def is_missing_container_error(message: str) -> bool:
     )
 
 
-def execute_plan(plan: PodmanPlan) -> None:
-    for action in plan.actions:
+def execute_actions(actions: list[PlannedAction]) -> None:
+    for action in actions:
         run_command(action.command)
+
+
+def execute_plan(plan: PodmanPlan) -> None:
+    execute_actions(plan.actions)
