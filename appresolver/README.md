@@ -212,7 +212,16 @@ python -m appresolver install-package ubuntu-24.04-default curl --execute
 python -m appresolver install-package ubuntu-24.04-default curl --execute --json
 ```
 
-Package installation currently supports apt-based `ubuntu:*` and `debian:*` images only. App Resolver runs `apt-get update` and `apt-get install -y PACKAGE` inside the managed container. Installed package state is not tracked in the manifest yet.
+Package installation currently supports apt-based `ubuntu:*` and `debian:*` images only. App Resolver runs `apt-get update` and `apt-get install -y PACKAGE` inside the managed container.
+
+After a successful `install-package --execute`, App Resolver records the package in the environment manifest as a resolver-installed package:
+
+```bash
+python -m appresolver show-environment-packages ubuntu-24.04-default
+python -m appresolver --json show-environment-packages ubuntu-24.04-default
+```
+
+Package tracking records only packages installed through App Resolver. It does not inventory all packages in the container or query the full apt database. Package removal is not implemented yet.
 
 If an environment is `created` or `stopped`, `install-package --execute` starts it first, updates the manifest status to `running`, and leaves it running for now.
 
@@ -262,7 +271,7 @@ Included:
 - explicit Podman environment start/stop lifecycle with `--execute`
 - explicit Podman environment runtime cleanup with `destroy-environment --execute`
 - Podman runtime state inspection and manifest reconciliation
-- apt package installation inside ubuntu/debian managed containers
+- apt package installation and resolver-installed package tracking inside ubuntu/debian managed containers
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
@@ -276,5 +285,6 @@ Not included:
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
 - app export from containers
+- package removal inside containers
 - Podman availability checks
 - permission enforcement beyond Flatpak-reported permission readout

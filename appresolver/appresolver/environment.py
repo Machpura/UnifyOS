@@ -8,6 +8,7 @@ from appresolver.errors import InvalidAppIdError, ManifestError
 
 
 JsonObject = dict[str, Any]
+PackageRecord = dict[str, str]
 
 ENVIRONMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -64,6 +65,49 @@ class EnvironmentManifest:
     def to_dict(self) -> JsonObject:
         return asdict(self)
 
+    def installed_packages(self) -> list[PackageRecord]:
+        raw_packages = self.source.get("installed_packages", [])
+        if not isinstance(raw_packages, list):
+            raise ManifestError("environment manifest source.installed_packages must be a list")
+
+        packages: list[PackageRecord] = []
+        for raw_package in raw_packages:
+            if not isinstance(raw_package, dict):
+                raise ManifestError("environment manifest source.installed_packages must contain objects")
+            name = raw_package.get("name")
+            manager = raw_package.get("manager")
+            installed_at = raw_package.get("installed_at")
+            if not isinstance(name, str) or not name:
+                raise ManifestError("environment package record field 'name' must be a non-empty string")
+            if not isinstance(manager, str) or not manager:
+                raise ManifestError("environment package record field 'manager' must be a non-empty string")
+            if not isinstance(installed_at, str) or not installed_at:
+                raise ManifestError("environment package record field 'installed_at' must be a non-empty string")
+            packages.append({"name": name, "manager": manager, "installed_at": installed_at})
+        return packages
+
+    def with_installed_package(self, name: str, manager: str, installed_at: str) -> EnvironmentManifest:
+        packages = self.installed_packages()
+        if any(package["name"] == name for package in packages):
+            return self
+
+        source = dict(self.source)
+        source["installed_packages"] = [
+            *packages,
+            {"name": name, "manager": manager, "installed_at": installed_at},
+        ]
+        return EnvironmentManifest(
+            environment_id=self.environment_id,
+            name=self.name,
+            backend=self.backend,
+            image=self.image,
+            status=self.status,
+            created_at=self.created_at,
+            permissions=self.permissions,
+            apps=self.apps,
+            source=source,
+        )
+
     @classmethod
     def from_dict(cls, data: JsonObject) -> EnvironmentManifest:
         try:
@@ -80,4 +124,3 @@ class EnvironmentManifest:
             )
         except KeyError as exc:
             raise ManifestError(f"environment manifest is missing required field '{exc.args[0]}'") from exc
-

@@ -252,6 +252,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="print structured JSON output",
     )
 
+    show_environment_packages_parser = subparsers.add_parser(
+        "show-environment-packages", help="show packages installed through App Resolver in an environment"
+    )
+    show_environment_packages_parser.add_argument("environment_id")
+    show_environment_packages_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
     list_parser = subparsers.add_parser("list", help="list resolver-managed apps")
     list_parser.add_argument(
         "--json",
@@ -358,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.execute,
                 args.json_output,
             )
+        if args.command == "show-environment-packages":
+            return command_show_environment_packages(environment_registry, args.environment_id, args.json_output)
         if args.command == "list":
             return command_list(registry, args.json_output)
         if args.command == "permissions":
@@ -761,17 +775,17 @@ def command_install_package(
         f"install package {plan.package} in environment {manifest.environment_id}"
     )
     executed_actions = execute_package_install_plan(environment_registry, manifest, plan)
+    track_installed_package(environment_registry, manifest.environment_id, plan.package, plan.package_manager)
 
     if as_json:
-        print_json(package_install_result(plan, status="installed", executed=True))
+        print_json(package_install_result(plan, status="installed", executed=True, tracked=True))
         return 0
 
-    print(f"Installed package {plan.package} in environment {manifest.environment_id}")
+    print(f"Installed and tracked package {plan.package} in environment {manifest.environment_id}")
     print("Executed Podman actions:")
     for action in executed_actions:
         print(" ".join(action.command))
-    if manifest.status != "running":
-        print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
     return 0
 
 
@@ -799,6 +813,46 @@ def execute_package_install_plan(
     execute_actions(remaining_actions)
     executed_actions.extend(remaining_actions)
     return executed_actions
+
+
+def track_installed_package(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    package_name: str,
+    package_manager: str,
+) -> None:
+    manifest = environment_registry.load(environment_id)
+    if any(package["name"] == package_name for package in manifest.installed_packages()):
+        return
+
+    tracked_manifest = manifest.with_installed_package(package_name, package_manager, utc_timestamp())
+    try:
+        environment_registry.update(tracked_manifest)
+    except AppResolverError as exc:
+        raise AppResolverError(
+            "package may have been installed in the runtime but registry tracking failed "
+            f"for '{environment_id}': {exc}"
+        ) from exc
+
+
+def command_show_environment_packages(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    packages = manifest.installed_packages()
+    if as_json:
+        print_json(packages)
+        return 0
+
+    if not packages:
+        print("No resolver-tracked packages.")
+        return 0
+
+    for package in packages:
+        print(f"{package['name']}\t{package['manager']}\t{package['installed_at']}")
+    return 0
 
 
 def command_import_appimage(registry: AppRegistry, state_paths: StatePaths, source_path: Path, dry_run: bool) -> int:
@@ -939,8 +993,10 @@ def environment_runtime_result(plan: PodmanPlan, status: str, executed: bool) ->
     }
 
 
-def package_install_result(plan: PackageInstallPlan, status: str, executed: bool) -> dict[str, Any]:
-    return {
+def package_install_result(
+    plan: PackageInstallPlan, status: str, executed: bool, tracked: bool | None = None
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "environment_id": plan.environment_id,
         "package": plan.package,
         "package_manager": plan.package_manager,
@@ -948,6 +1004,9 @@ def package_install_result(plan: PackageInstallPlan, status: str, executed: bool
         "executed": executed,
         "actions": [action.to_dict() for action in plan.actions],
     }
+    if tracked is not None:
+        result["tracked"] = tracked
+    return result
 
 
 def environment_inspection_result(manifest: EnvironmentManifest) -> dict[str, object]:

@@ -89,6 +89,57 @@ def test_environment_manifest_rejects_non_object_source() -> None:
         EnvironmentManifest.from_dict(data)
 
 
+def test_environment_manifest_without_installed_packages_returns_empty_list() -> None:
+    manifest = make_environment_manifest()
+
+    assert manifest.installed_packages() == []
+
+
+def test_environment_manifest_with_installed_package_adds_record_under_source() -> None:
+    manifest = make_environment_manifest()
+
+    updated = manifest.with_installed_package("curl", "apt", "2026-06-03T12:00:00+00:00")
+
+    assert updated.source["type"] == "manual"
+    assert updated.installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+def test_environment_manifest_with_installed_package_does_not_duplicate_existing_record() -> None:
+    manifest = make_environment_manifest().with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+
+    updated = manifest.with_installed_package("curl", "apt", "2026-06-03T13:00:00+00:00")
+
+    assert updated.installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "installed_packages",
+    [
+        "curl",
+        ["curl"],
+        [{"manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}],
+        [{"name": "curl", "installed_at": "2026-06-03T12:00:00+00:00"}],
+        [{"name": "curl", "manager": "apt"}],
+    ],
+)
+def test_environment_manifest_rejects_malformed_installed_packages(installed_packages: object) -> None:
+    manifest = EnvironmentManifest.from_dict(
+        {
+            **make_environment_manifest().to_dict(),
+            "source": {"type": "manual", "installed_packages": installed_packages},
+        }
+    )
+
+    with pytest.raises(ManifestError):
+        manifest.installed_packages()
+
+
 @pytest.mark.parametrize(
     "environment_id",
     [
@@ -113,4 +164,3 @@ def test_validate_environment_id_accepts_safe_id() -> None:
 
 def test_filename_for_environment_id_uses_allowlisted_id() -> None:
     assert filename_for_environment_id("ubuntu-24.04-default") == "ubuntu-24.04-default.json"
-
