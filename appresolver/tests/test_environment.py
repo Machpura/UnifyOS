@@ -118,6 +118,17 @@ def test_environment_manifest_with_installed_package_does_not_duplicate_existing
     ]
 
 
+def test_environment_manifest_without_installed_packages_clears_records_and_preserves_source() -> None:
+    manifest = make_environment_manifest().with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+
+    updated = manifest.without_installed_packages()
+
+    assert updated.source == {"type": "manual"}
+    assert updated.installed_packages() == []
+
+
 @pytest.mark.parametrize(
     "installed_packages",
     [

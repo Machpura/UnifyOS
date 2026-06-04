@@ -561,7 +561,8 @@ def command_destroy_environment(
 
     RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"destroy environment {manifest.environment_id}")
     execute_plan(plan)
-    defined_manifest = replace(manifest, status="defined")
+    cleared_tracked_packages = bool(manifest.installed_packages())
+    defined_manifest = replace(manifest.without_installed_packages(), status="defined")
     try:
         environment_registry.update(defined_manifest)
     except AppResolverError as exc:
@@ -571,10 +572,19 @@ def command_destroy_environment(
         ) from exc
 
     if as_json:
-        print_json(environment_runtime_result(plan, status="defined", executed=True))
+        print_json(
+            {
+                **environment_runtime_result(plan, status="defined", executed=True),
+                "cleared_tracked_packages": cleared_tracked_packages,
+            }
+        )
         return 0
 
     print(f"Destroyed environment runtime {manifest.environment_id}")
+    if cleared_tracked_packages:
+        print("Cleared runtime package tracking.")
+    else:
+        print("No runtime package tracking to clear.")
     print("Executed Podman actions:")
     for action in plan.actions:
         print(" ".join(action.command))

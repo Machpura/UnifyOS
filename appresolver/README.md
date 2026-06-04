@@ -166,6 +166,7 @@ python -m appresolver destroy-environment ubuntu-24.04-default --execute --json
 ```
 
 `destroy-environment` removes only the runtime container. It does not delete the environment definition.
+When destroy succeeds, resolver-tracked packages for that runtime are cleared from the manifest.
 Running environments must be stopped before destroy.
 
 Environment lifecycle:
@@ -221,7 +222,7 @@ python -m appresolver show-environment-packages ubuntu-24.04-default
 python -m appresolver --json show-environment-packages ubuntu-24.04-default
 ```
 
-Package tracking records only packages installed through App Resolver. It does not inventory all packages in the container or query the full apt database. Package removal is not implemented yet.
+Package tracking records only packages installed through App Resolver in the current runtime container. It does not inventory all packages in the container or query the full apt database. Destroying the runtime clears tracked installed packages because the container no longer exists. Package history, package sync/reinstall, and package removal are not implemented yet.
 
 If an environment is `created` or `stopped`, `install-package --execute` starts it first, updates the manifest status to `running`, and leaves it running for now.
 
