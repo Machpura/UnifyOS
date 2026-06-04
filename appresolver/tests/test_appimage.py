@@ -89,7 +89,6 @@ def test_derive_app_id_normalizes_filename_characters() -> None:
 @pytest.mark.parametrize(
     "source_name",
     [
-        "Example.appimage",
         "Example",
         "Example.txt",
     ],
@@ -99,6 +98,12 @@ def test_validate_source_path_rejects_non_appimage_suffix(tmp_path: Path, source
 
     with pytest.raises(BackendError, match=".AppImage"):
         validate_source_path(source_path)
+
+
+def test_validate_source_path_accepts_lowercase_appimage_suffix(tmp_path: Path) -> None:
+    source_path = write_appimage(tmp_path / "Example.appimage")
+
+    assert validate_source_path(source_path) == source_path.resolve()
 
 
 def test_validate_source_path_rejects_missing_source(tmp_path: Path) -> None:

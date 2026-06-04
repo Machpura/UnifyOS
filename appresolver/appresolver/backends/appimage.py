@@ -39,7 +39,7 @@ def validate_source_path(source_path: Path) -> Path:
         raise BackendError(f"AppImage source does not exist: {source_path}")
     if not source_path.is_file():
         raise BackendError(f"AppImage source is not a regular file: {source_path}")
-    if source_path.suffix != ".AppImage":
+    if source_path.suffix.lower() != ".appimage":
         raise BackendError(f"AppImage source must end with .AppImage: {source_path}")
     return source_path.resolve()
 

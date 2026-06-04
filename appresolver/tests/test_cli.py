@@ -317,6 +317,139 @@ def test_subcommand_dry_run_import_appimage_mutates_nothing(
     assert "Would write manifest:" in capsys.readouterr().out
 
 
+def test_open_appimage_human_plan_outputs_route_without_mutating(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert f"File: {source_path.resolve()}" in output
+    assert "Detected type: appimage" in output
+    assert "Route: managed-appimage-import" in output
+    assert "Supported now: true" in output
+    assert "Execution: skipped" in output
+    assert not registry_dir.exists()
+    assert not appimages_dir_for_registry(registry_dir).exists()
+    assert not launchers_dir_for_registry(registry_dir).exists()
+
+
+def test_global_json_open_appimage_outputs_plan(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "open", str(source_path)])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["detected_type"] == "appimage"
+    assert output["supported"] is True
+    assert output["status"] == "planned-import"
+    assert output["executed"] is False
+    assert output["route"] == "managed-appimage-import"
+    assert len(output["actions"]) == 4
+
+
+def test_subcommand_json_open_appimage_outputs_plan(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path), "--json"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["detected_type"] == "appimage"
+    assert output["executed"] is False
+
+
+def test_json_open_appimage_execute_works_before_and_after_subcommand(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    global_registry_dir = tmp_path / "global" / ".appresolver" / "apps"
+    global_source_path = write_appimage(tmp_path / "downloads" / "Global.AppImage")
+
+    global_exit_code = main(
+        ["--registry-dir", str(global_registry_dir), "--json", "open", str(global_source_path), "--execute"]
+    )
+
+    assert global_exit_code == 0
+    global_output = json.loads(capsys.readouterr().out)
+    assert global_output["status"] == "imported"
+    assert global_output["executed"] is True
+    assert global_output["app_id"] == "Global"
+
+    subcommand_registry_dir = tmp_path / "subcommand" / ".appresolver" / "apps"
+    subcommand_source_path = write_appimage(tmp_path / "downloads" / "Subcommand.AppImage")
+
+    subcommand_exit_code = main(
+        ["--registry-dir", str(subcommand_registry_dir), "open", str(subcommand_source_path), "--execute", "--json"]
+    )
+
+    assert subcommand_exit_code == 0
+    subcommand_output = json.loads(capsys.readouterr().out)
+    assert subcommand_output["status"] == "imported"
+    assert subcommand_output["executed"] is True
+    assert subcommand_output["app_id"] == "Subcommand"
+
+
+def test_open_appimage_execute_imports(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path), "--execute"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Status: imported" in output
+    assert "Execution: completed" in output
+    assert "App ID: Example" in output
+    assert (registry_dir / "Example.json").exists()
+    assert managed_appimage_path(registry_dir, "Example").exists()
+    assert launcher_path(registry_dir, "Example").exists()
+
+
+def test_open_deb_plan_reports_future_route_without_mutating(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "example.deb", "not a real package")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Detected type: deb" in output
+    assert "Route: future-debian-environment" in output
+    assert "Supported now: false" in output
+    assert ".deb import is not implemented yet" in output
+    assert not registry_dir.parent.exists()
+
+
+def test_open_unsupported_execute_fails_clearly(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "example.deb", "not a real package")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path), "--execute"])
+
+    assert exit_code == 1
+    assert ".deb import is not implemented yet" in capsys.readouterr().err
+    assert not registry_dir.parent.exists()
+
+
+def test_open_shell_script_execute_refuses_clearly(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    source_path = write_appimage(tmp_path / "downloads" / "install.sh")
+
+    exit_code = main(["--registry-dir", str(registry_dir), "open", str(source_path), "--execute"])
+
+    assert exit_code == 1
+    assert "shell scripts are unsafe" in capsys.readouterr().err
+    assert not registry_dir.parent.exists()
+
+
 def test_import_appimage_duplicate_app_id_does_not_overwrite_managed_file(tmp_path: Path) -> None:
     registry_dir = tmp_path / ".appresolver" / "apps"
     source_path = write_appimage(tmp_path / "downloads" / "Example.AppImage", "new")

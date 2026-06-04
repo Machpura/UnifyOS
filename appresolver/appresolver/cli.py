@@ -27,6 +27,7 @@ from appresolver.errors import AppResolverError
 from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry, default_registry_dir, validate_app_id
 from appresolver.services import environments as environment_services
+from appresolver.services import files as file_services
 from appresolver.services import packages as package_services
 from appresolver.services import summaries as summary_services
 from appresolver.state import StatePaths
@@ -72,6 +73,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=argparse.SUPPRESS,
         help="print planned actions without changing state",
+    )
+
+    open_parser = subparsers.add_parser("open", help="detect and route an installer or app file")
+    open_parser.add_argument("path", type=Path)
+    open_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute the supported route",
+    )
+    open_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
     )
 
     define_environment_parser = subparsers.add_parser(
@@ -331,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_install_flatpak(registry, args.app_id, args.dry_run)
         if args.command == "import-appimage":
             return command_import_appimage(registry, state_paths, args.path, args.dry_run)
+        if args.command == "open":
+            return command_open(registry, state_paths, args.path, args.execute, args.json_output)
         if args.command == "define-environment":
             return command_define_environment(
                 environment_registry,
@@ -794,6 +812,22 @@ def command_import_appimage(registry: AppRegistry, state_paths: StatePaths, sour
     return 0
 
 
+def command_open(
+    registry: AppRegistry,
+    state_paths: StatePaths,
+    path: Path,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    result = file_services.open_path(registry, state_paths, path, execute)
+    if as_json:
+        print_json(result)
+        return 0
+
+    print_open_result(result)
+    return 0
+
+
 def command_list(registry: AppRegistry, as_json: bool) -> int:
     manifests = registry.list()
     if as_json:
@@ -922,6 +956,40 @@ def print_environment_summary(summary: dict[str, object]) -> None:
             print(str(action))
     else:
         print("Available actions: none")
+
+
+def print_open_result(result: dict[str, Any]) -> None:
+    print(f"File: {result['path']}")
+    print(f"Detected type: {result['detected_type']}")
+    print(f"Route: {result['route']}")
+    print(f"Supported now: {str(result['supported']).lower()}")
+    print(f"Status: {result['status']}")
+    print(f"Message: {result['message']}")
+
+    actions = result.get("actions")
+    if isinstance(actions, list) and actions:
+        print("Planned actions:")
+        for action in actions:
+            if isinstance(action, dict):
+                print(f"- {format_open_action(action)}")
+    else:
+        print("Planned actions: none")
+
+    if result.get("executed") is True:
+        print("Execution: completed")
+        if "app_id" in result:
+            print(f"App ID: {result['app_id']}")
+    else:
+        print("Execution: skipped")
+
+
+def format_open_action(action: dict[str, object]) -> str:
+    description = str(action.get("description", action.get("id", "action")))
+    if "source" in action and "target" in action:
+        return f"{description}: {action['source']} -> {action['target']}"
+    if "path" in action:
+        return f"{description}: {action['path']}"
+    return description
 
 
 def print_json(value: Any) -> None:

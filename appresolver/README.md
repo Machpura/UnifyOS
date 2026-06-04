@@ -90,6 +90,23 @@ python -m appresolver --dry-run import-appimage ~/Downloads/Example.AppImage
 
 Managed AppImages are copied into `./.appresolver/appimages/`, local launchers are written into `./.appresolver/launchers/`, and manifests are written into `./.appresolver/apps/`.
 
+Detect and route a downloaded installer or app file:
+
+```bash
+python -m appresolver open ~/Downloads/Example.AppImage
+python -m appresolver --json open ~/Downloads/Example.AppImage
+```
+
+Execute the supported route for an AppImage:
+
+```bash
+python -m appresolver open ~/Downloads/Example.AppImage --execute
+```
+
+`open` currently imports `.AppImage` and `.appimage` files through the managed AppImage importer. It does not execute the AppImage and does not export launchers outside `./.appresolver/launchers/`.
+
+`.deb`, `.rpm`, `.exe`, and `.flatpakref` files are detected and reported with future routes, but direct execution/import is not implemented yet. Shell scripts are refused in normal mode. MIME association and double-click desktop integration are not implemented yet.
+
 Define an environment record without creating runtime resources:
 
 ```bash
@@ -307,6 +324,7 @@ Included:
 - project-local app registry
 - Flatpak install, permissions, list, and uninstall commands
 - managed AppImage import and uninstall
+- file-oriented `open PATH` detection and AppImage import routing
 - environment definition manifests
 - Podman environment command planning
 - explicit Podman environment creation with `--execute`
@@ -316,17 +334,19 @@ Included:
 - apt package installation/removal and resolver-installed package tracking inside ubuntu/debian managed containers
 - environment summary output for future GUI/App Center consumers
 - dry-run support for Flatpak install, AppImage import, and uninstall
-- JSON output for list and permissions
+- JSON output for resolver/app/environment commands
 
 Not included:
 
-- GUI/App Center
+- full App Center
 - Wine or Proton
 - AUR
 - system components
 - AppImage execution during import
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
+- MIME associations and double-click desktop integration
+- direct `.deb`, `.rpm`, `.flatpakref`, or Windows installer execution
 - app export from containers
 - apt autoremove or purge
 - package inventory for manually installed container packages
