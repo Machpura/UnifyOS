@@ -2188,6 +2188,30 @@ def test_inspect_environment_global_json_output(
     }
 
 
+def test_inspect_environment_defined_with_no_such_object_is_consistent_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="defined")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "inspect-environment", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "manifest_status": "defined",
+        "runtime_status": "missing",
+        "consistent": True,
+        "suggested_status": "defined",
+    }
+
+
 def test_inspect_environment_subcommand_json_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -2354,6 +2378,30 @@ def test_reconcile_environment_already_consistent_does_not_update(
     assert exit_code == 0
     assert "already consistent" in capsys.readouterr().out
     assert environment_registry.load("ubuntu-24.04-default").status == "running"
+
+
+def test_reconcile_environment_defined_missing_no_such_object_does_not_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="defined")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise AssertionError("defined + missing reconcile must not update")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "reconcile-environment", "ubuntu-24.04-default", "--execute"]
+    )
+
+    assert exit_code == 0
+    assert "already consistent" in capsys.readouterr().out
+    assert environment_registry.load("ubuntu-24.04-default").status == "defined"
 
 
 def test_reconcile_environment_global_json_plan_output(

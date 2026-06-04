@@ -230,6 +230,19 @@ def test_inspect_environment_runtime_treats_no_such_container_as_missing(
     assert inspection.runtime_status == "missing"
 
 
+def test_inspect_environment_runtime_treats_no_such_object_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    inspection = inspect_environment_runtime(make_environment_manifest(status="defined"))
+
+    assert inspection.runtime_status == "missing"
+
+
 def test_inspect_environment_runtime_rejects_unexpected_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         raise CommandExecutionError("permission denied")

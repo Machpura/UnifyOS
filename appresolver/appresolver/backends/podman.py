@@ -193,7 +193,9 @@ def is_missing_container_error(message: str) -> bool:
     normalized = message.lower()
     return (
         ("no such" in normalized and "container" in normalized)
+        or "no such object" in normalized
         or "no container with name or id" in normalized
+        or "no container with id or name" in normalized
         or "does not exist" in normalized
     )
 
