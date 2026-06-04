@@ -2,7 +2,7 @@
 
 App Resolver v0 is a CLI prototype for managing apps through one normalized registry.
 
-This version supports Flatpak installs, managed AppImage imports, and explicit Podman environment creation. It does not include a GUI, Wine, AUR, or system components.
+This version supports Flatpak installs, managed AppImage imports, explicit Podman environment creation, and an experimental environment-management GUI. It does not include Wine, AUR, or system components.
 
 ## Registry
 
@@ -25,6 +25,7 @@ python -m appresolver --registry-dir /tmp/appresolver-test/apps list
 - Python 3.11+
 - Flatpak installed and available on `PATH` for Flatpak commands
 - Flathub configured as a Flatpak remote for Flatpak installs
+- PySide6 for the optional GUI prototype
 
 ## Development
 
@@ -32,6 +33,12 @@ Install in editable mode from the repository root:
 
 ```bash
 python -m pip install -e ./appresolver
+```
+
+Install optional GUI dependencies:
+
+```bash
+python -m pip install -e './appresolver[gui]'
 ```
 
 Run tests:
@@ -47,6 +54,15 @@ List resolver-managed apps:
 ```bash
 python -m appresolver list
 ```
+
+Launch the experimental GUI:
+
+```bash
+python -m appresolver.gui
+appresolver-gui
+```
+
+The GUI uses the same resolver services as the CLI. It lists environments, shows summaries and tracked packages, displays plan-only actions, and asks for confirmation before execute actions. Execute actions run in a background Qt worker so the window remains responsive. The GUI is a prototype, not a full App Center.
 
 Install a Flatpak app by ID:
 
