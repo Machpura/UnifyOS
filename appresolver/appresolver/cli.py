@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,23 +20,15 @@ from appresolver.backends.podman import (
     PackageInstallPlan,
     PackageRemovePlan,
     PodmanPlan,
-    PlannedAction,
-    execute_actions,
-    execute_plan,
-    inspect_environment_runtime,
-    plan_destroy_environment,
-    plan_environment,
-    plan_install_package,
-    plan_remove_package,
-    plan_start_environment,
-    plan_stop_environment,
 )
 from appresolver.environment import EnvironmentManifest
 from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import AppResolverError
-from appresolver.manifest import AppManifest, utc_timestamp
+from appresolver.manifest import AppManifest
 from appresolver.registry import AppRegistry, default_registry_dir, validate_app_id
-from appresolver.runtime_policy import EXECUTE, RuntimePolicy
+from appresolver.services import environments as environment_services
+from appresolver.services import packages as package_services
+from appresolver.services import summaries as summary_services
 from appresolver.state import StatePaths
 
 
@@ -451,32 +442,20 @@ def command_define_environment(
     image: str,
     dry_run: bool,
 ) -> int:
-    manifest = EnvironmentManifest(
-        environment_id=environment_id,
-        name=name,
-        backend=backend,
-        image=image,
-        status="defined",
-        created_at=utc_timestamp(),
-        permissions={},
-        apps=[],
-        source={"type": "manual"},
+    manifest = environment_services.define_environment(
+        environment_registry, environment_id, name, backend, image, dry_run
     )
-    if environment_registry.exists(manifest.environment_id):
-        raise AppResolverError(f"environment '{manifest.environment_id}' is already managed by App Resolver")
-
     if dry_run:
         print(f"Would write environment manifest: {environment_registry.path_for(manifest.environment_id)}")
         return 0
 
-    environment_registry.save(manifest)
     print(f"Defined environment {manifest.environment_id}")
     print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
     return 0
 
 
 def command_list_environments(environment_registry: EnvironmentRegistry, as_json: bool) -> int:
-    manifests = environment_registry.list()
+    manifests = environment_services.list_environments(environment_registry)
     if as_json:
         print_json([environment_summary(manifest) for manifest in manifests])
         return 0
@@ -493,7 +472,7 @@ def command_list_environments(environment_registry: EnvironmentRegistry, as_json
 def command_show_environment(
     environment_registry: EnvironmentRegistry, environment_id: str, as_json: bool
 ) -> int:
-    manifest = environment_registry.load(environment_id)
+    manifest = environment_services.load_environment(environment_registry, environment_id)
     if as_json:
         print_json(manifest.to_dict())
         return 0
@@ -506,12 +485,11 @@ def command_show_environment(
 def command_delete_environment(
     environment_registry: EnvironmentRegistry, environment_id: str, dry_run: bool
 ) -> int:
-    manifest = environment_registry.load(environment_id)
+    manifest = environment_services.delete_environment(environment_registry, environment_id, dry_run)
     if dry_run:
         print(f"Would delete environment manifest: {environment_registry.path_for(manifest.environment_id)}")
         return 0
 
-    environment_registry.delete(manifest.environment_id)
     print(f"Deleted environment {manifest.environment_id}")
     return 0
 
@@ -519,8 +497,7 @@ def command_delete_environment(
 def command_plan_environment(
     environment_registry: EnvironmentRegistry, environment_id: str, as_json: bool
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_environment(manifest)
+    plan = environment_services.plan_environment_command(environment_registry, environment_id)
     if as_json:
         print_json(plan.to_dict())
         return 0
@@ -535,42 +512,25 @@ def command_create_environment(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_environment(manifest)
+    result = environment_services.create_environment(environment_registry, environment_id, execute)
     if not execute:
         if as_json:
-            print_json(create_environment_result(plan, status="planned", executed=False))
+            print_json(result.output)
             return 0
 
-        print_plan(plan)
+        print_plan(result.plan)
         print("Execution not performed. Re-run with --execute to create the environment.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"create environment {manifest.environment_id}")
-    if manifest.status == "created":
-        raise AppResolverError(
-            f"environment '{manifest.environment_id}' is already created; refusing to recreate managed container"
-        )
-
-    execute_plan(plan)
-    created_manifest = replace(manifest, status="created")
-    try:
-        environment_registry.update(created_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "environment container may exist but registry update failed "
-            f"for '{manifest.environment_id}': {exc}"
-        ) from exc
-
     if as_json:
-        print_json(create_environment_result(plan, status="created", executed=True))
+        print_json(result.output)
         return 0
 
-    print(f"Created environment {manifest.environment_id}")
+    print(f"Created environment {result.plan.environment_id}")
     print("Executed Podman actions:")
-    for action in plan.actions:
+    for action in result.plan.actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
 
 
@@ -580,57 +540,29 @@ def command_destroy_environment(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_destroy_environment(manifest)
-    if manifest.status == "running":
-        raise AppResolverError(
-            f"environment '{manifest.environment_id}' is running; stop the environment before destroying it"
-        )
-    if manifest.status not in {"created", "stopped"}:
-        raise AppResolverError(
-            f"environment '{manifest.environment_id}' status is '{manifest.status}'; "
-            "destroy requires status 'created' or 'stopped'"
-        )
-
+    result = environment_services.destroy_environment(environment_registry, environment_id, execute)
     if not execute:
         if as_json:
-            print_json(environment_runtime_result(plan, status="planned-destroy", executed=False))
+            print_json(result.output)
             return 0
 
-        print_plan(plan)
+        print_plan(result.plan)
         print("Execution not performed. Re-run with --execute to destroy the environment runtime.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"destroy environment {manifest.environment_id}")
-    execute_plan(plan)
-    cleared_tracked_packages = bool(manifest.installed_packages())
-    defined_manifest = replace(manifest.without_installed_packages(), status="defined")
-    try:
-        environment_registry.update(defined_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "environment container may have been removed but registry update failed "
-            f"for '{manifest.environment_id}': {exc}"
-        ) from exc
-
     if as_json:
-        print_json(
-            {
-                **environment_runtime_result(plan, status="defined", executed=True),
-                "cleared_tracked_packages": cleared_tracked_packages,
-            }
-        )
+        print_json(result.output)
         return 0
 
-    print(f"Destroyed environment runtime {manifest.environment_id}")
-    if cleared_tracked_packages:
+    print(f"Destroyed environment runtime {result.plan.environment_id}")
+    if result.output["cleared_tracked_packages"]:
         print("Cleared runtime package tracking.")
     else:
         print("No runtime package tracking to clear.")
     print("Executed Podman actions:")
-    for action in plan.actions:
+    for action in result.plan.actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
 
 
@@ -640,43 +572,25 @@ def command_start_environment(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_start_environment(manifest)
-    if manifest.status not in {"created", "stopped"}:
-        raise AppResolverError(
-            f"environment '{manifest.environment_id}' status is '{manifest.status}'; "
-            "start requires status 'created' or 'stopped'"
-        )
-
+    result = environment_services.start_environment(environment_registry, environment_id, execute)
     if not execute:
         if as_json:
-            print_json(environment_runtime_result(plan, status="planned-start", executed=False))
+            print_json(result.output)
             return 0
 
-        print_plan(plan)
+        print_plan(result.plan)
         print("Execution not performed. Re-run with --execute to start the environment runtime.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"start environment {manifest.environment_id}")
-    execute_plan(plan)
-    running_manifest = replace(manifest, status="running")
-    try:
-        environment_registry.update(running_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "environment runtime state may have changed but registry update failed "
-            f"for '{manifest.environment_id}': {exc}"
-        ) from exc
-
     if as_json:
-        print_json(environment_runtime_result(plan, status="running", executed=True))
+        print_json(result.output)
         return 0
 
-    print(f"Started environment runtime {manifest.environment_id}")
+    print(f"Started environment runtime {result.plan.environment_id}")
     print("Executed Podman actions:")
-    for action in plan.actions:
+    for action in result.plan.actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
 
 
@@ -686,42 +600,25 @@ def command_stop_environment(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_stop_environment(manifest)
-    if manifest.status != "running":
-        raise AppResolverError(
-            f"environment '{manifest.environment_id}' status is '{manifest.status}'; stop requires status 'running'"
-        )
-
+    result = environment_services.stop_environment(environment_registry, environment_id, execute)
     if not execute:
         if as_json:
-            print_json(environment_runtime_result(plan, status="planned-stop", executed=False))
+            print_json(result.output)
             return 0
 
-        print_plan(plan)
+        print_plan(result.plan)
         print("Execution not performed. Re-run with --execute to stop the environment runtime.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"stop environment {manifest.environment_id}")
-    execute_plan(plan)
-    stopped_manifest = replace(manifest, status="stopped")
-    try:
-        environment_registry.update(stopped_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "environment runtime state may have changed but registry update failed "
-            f"for '{manifest.environment_id}': {exc}"
-        ) from exc
-
     if as_json:
-        print_json(environment_runtime_result(plan, status="stopped", executed=True))
+        print_json(result.output)
         return 0
 
-    print(f"Stopped environment runtime {manifest.environment_id}")
+    print(f"Stopped environment runtime {result.plan.environment_id}")
     print("Executed Podman actions:")
-    for action in plan.actions:
+    for action in result.plan.actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
 
 
@@ -730,8 +627,7 @@ def command_inspect_environment(
     environment_id: str,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    result = environment_inspection_result(manifest)
+    result = environment_services.inspect_environment(environment_registry, environment_id)
 
     if as_json:
         print_json(result)
@@ -747,19 +643,10 @@ def command_reconcile_environment(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    result = environment_inspection_result(manifest)
-    suggested_status = result["suggested_status"]
-    if not isinstance(suggested_status, str):
-        raise AppResolverError(
-            f"cannot reconcile environment '{manifest.environment_id}' because runtime status is "
-            f"'{result['runtime_status']}'"
-        )
-
-    if result["consistent"] is True:
-        output = {**result, "executed": False}
+    result = environment_services.reconcile_environment(environment_registry, environment_id, execute)
+    if result.get("consistent") is True:
         if as_json:
-            print_json(output)
+            print_json(result)
             return 0
 
         print_environment_inspection(result)
@@ -767,40 +654,20 @@ def command_reconcile_environment(
         return 0
 
     if not execute:
-        output = {**result, "executed": False}
         if as_json:
-            print_json(output)
+            print_json(result)
             return 0
 
         print_environment_inspection(result)
-        print(f"Proposed manifest status: {suggested_status}")
+        print(f"Proposed manifest status: {result['suggested_status']}")
         print("Execution not performed. Re-run with --execute to update the manifest.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(f"reconcile environment {manifest.environment_id}")
-    previous_status = manifest.status
-    if previous_status != suggested_status:
-        reconciled_manifest = replace(manifest, status=suggested_status)
-        try:
-            environment_registry.update(reconciled_manifest)
-        except AppResolverError as exc:
-            raise AppResolverError(
-                "environment runtime state was inspected but registry update failed "
-                f"for '{manifest.environment_id}': {exc}"
-            ) from exc
-
-    output = {
-        "environment_id": manifest.environment_id,
-        "previous_status": previous_status,
-        "runtime_status": result["runtime_status"],
-        "new_status": suggested_status,
-        "executed": True,
-    }
     if as_json:
-        print_json(output)
+        print_json(result)
         return 0
 
-    print(f"Reconciled environment {manifest.environment_id}: {previous_status} -> {suggested_status}")
+    print(f"Reconciled environment {result['environment_id']}: {result['previous_status']} -> {result['new_status']}")
     return 0
 
 
@@ -811,80 +678,26 @@ def command_install_package(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_install_package(manifest, package_name)
-
+    result = package_services.install_package(environment_registry, environment_id, package_name, execute)
     if not execute:
         if as_json:
-            print_json(package_install_result(plan, status="planned-install", executed=False))
+            print_json(result.output)
             return 0
 
-        print_package_install_plan(plan)
+        print_package_install_plan(result.plan)
         print("Execution not performed. Re-run with --execute to install the package.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(
-        f"install package {plan.package} in environment {manifest.environment_id}"
-    )
-    executed_actions = execute_package_install_plan(environment_registry, manifest, plan)
-    track_installed_package(environment_registry, manifest.environment_id, plan.package, plan.package_manager)
-
     if as_json:
-        print_json(package_install_result(plan, status="installed", executed=True, tracked=True))
+        print_json(result.output)
         return 0
 
-    print(f"Installed and tracked package {plan.package} in environment {manifest.environment_id}")
+    print(f"Installed and tracked package {result.plan.package} in environment {result.plan.environment_id}")
     print("Executed Podman actions:")
-    for action in executed_actions:
+    for action in result.executed_actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
-
-
-def execute_package_install_plan(
-    environment_registry: EnvironmentRegistry,
-    manifest: EnvironmentManifest,
-    plan: PackageInstallPlan,
-) -> list[PlannedAction]:
-    start_actions = [action for action in plan.actions if action.id == "start-container"]
-    remaining_actions = [action for action in plan.actions if action.id != "start-container"]
-    executed_actions: list[PlannedAction] = []
-
-    if start_actions:
-        execute_actions(start_actions)
-        executed_actions.extend(start_actions)
-        running_manifest = replace(manifest, status="running")
-        try:
-            environment_registry.update(running_manifest)
-        except AppResolverError as exc:
-            raise AppResolverError(
-                "environment runtime may be running but registry update failed "
-                f"for '{manifest.environment_id}': {exc}"
-            ) from exc
-
-    execute_actions(remaining_actions)
-    executed_actions.extend(remaining_actions)
-    return executed_actions
-
-
-def track_installed_package(
-    environment_registry: EnvironmentRegistry,
-    environment_id: str,
-    package_name: str,
-    package_manager: str,
-) -> None:
-    manifest = environment_registry.load(environment_id)
-    if any(package["name"] == package_name for package in manifest.installed_packages()):
-        return
-
-    tracked_manifest = manifest.with_installed_package(package_name, package_manager, utc_timestamp())
-    try:
-        environment_registry.update(tracked_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "package may have been installed in the runtime but registry tracking failed "
-            f"for '{environment_id}': {exc}"
-        ) from exc
 
 
 def command_show_environment_packages(
@@ -892,8 +705,7 @@ def command_show_environment_packages(
     environment_id: str,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    packages = manifest.installed_packages()
+    packages = package_services.tracked_packages(environment_registry, environment_id)
     if as_json:
         print_json(packages)
         return 0
@@ -914,76 +726,26 @@ def command_remove_package(
     execute: bool,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    plan = plan_remove_package(manifest, package_name)
-
+    result = package_services.remove_package(environment_registry, environment_id, package_name, execute)
     if not execute:
         if as_json:
-            print_json(package_remove_result(plan, status="planned-remove", executed=False))
+            print_json(result.output)
             return 0
 
-        print_package_remove_plan(plan)
+        print_package_remove_plan(result.plan)
         print("Execution not performed. Re-run with --execute to remove the package.")
         return 0
 
-    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(
-        f"remove package {plan.package} from environment {manifest.environment_id}"
-    )
-    executed_actions = execute_package_remove_plan(environment_registry, manifest, plan)
-    untrack_installed_package(environment_registry, manifest.environment_id, plan.package)
-
     if as_json:
-        print_json(package_remove_result(plan, status="removed", executed=True, tracked=False))
+        print_json(result.output)
         return 0
 
-    print(f"Removed and untracked package {plan.package} from environment {manifest.environment_id}")
+    print(f"Removed and untracked package {result.plan.package} from environment {result.plan.environment_id}")
     print("Executed Podman actions:")
-    for action in executed_actions:
+    for action in result.executed_actions:
         print(" ".join(action.command))
-    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    print(f"Manifest: {result.manifest_path}")
     return 0
-
-
-def execute_package_remove_plan(
-    environment_registry: EnvironmentRegistry,
-    manifest: EnvironmentManifest,
-    plan: PackageRemovePlan,
-) -> list[PlannedAction]:
-    start_actions = [action for action in plan.actions if action.id == "start-container"]
-    remaining_actions = [action for action in plan.actions if action.id != "start-container"]
-    executed_actions: list[PlannedAction] = []
-
-    if start_actions:
-        execute_actions(start_actions)
-        executed_actions.extend(start_actions)
-        running_manifest = replace(manifest, status="running")
-        try:
-            environment_registry.update(running_manifest)
-        except AppResolverError as exc:
-            raise AppResolverError(
-                "environment runtime may be running but registry update failed "
-                f"for '{manifest.environment_id}': {exc}"
-            ) from exc
-
-    execute_actions(remaining_actions)
-    executed_actions.extend(remaining_actions)
-    return executed_actions
-
-
-def untrack_installed_package(
-    environment_registry: EnvironmentRegistry,
-    environment_id: str,
-    package_name: str,
-) -> None:
-    manifest = environment_registry.load(environment_id)
-    untracked_manifest = manifest.without_installed_package(package_name)
-    try:
-        environment_registry.update(untracked_manifest)
-    except AppResolverError as exc:
-        raise AppResolverError(
-            "package may have been removed from the runtime but registry tracking failed "
-            f"for '{environment_id}': {exc}"
-        ) from exc
 
 
 def command_environment_summary(
@@ -991,13 +753,8 @@ def command_environment_summary(
     environment_id: str,
     as_json: bool,
 ) -> int:
-    manifest = environment_registry.load(environment_id)
-    if manifest.backend != "container":
-        raise AppResolverError(
-            f"environment summary requires environment backend 'container', got '{manifest.backend}'"
-        )
-
-    summary = environment_summary_result(manifest)
+    manifest = environment_services.load_environment(environment_registry, environment_id)
+    summary = summary_services.environment_summary_result(manifest)
     if as_json:
         print_json(summary)
         return 0
@@ -1108,14 +865,7 @@ def manifest_summary(manifest: AppManifest) -> dict[str, object]:
 
 
 def environment_summary(manifest: EnvironmentManifest) -> dict[str, object]:
-    return {
-        "environment_id": manifest.environment_id,
-        "name": manifest.name,
-        "backend": manifest.backend,
-        "image": manifest.image,
-        "status": manifest.status,
-        "created_at": manifest.created_at,
-    }
+    return environment_services.environment_summary(manifest)
 
 
 def print_plan(plan: PodmanPlan) -> None:
@@ -1134,113 +884,6 @@ def print_package_remove_plan(plan: PackageRemovePlan) -> None:
     print(f"Planned Podman actions for {plan.environment_id}:")
     for action in plan.actions:
         print(" ".join(action.command))
-
-
-def create_environment_result(plan: PodmanPlan, status: str, executed: bool) -> dict[str, Any]:
-    return environment_runtime_result(plan, status, executed)
-
-
-def environment_runtime_result(plan: PodmanPlan, status: str, executed: bool) -> dict[str, Any]:
-    return {
-        "environment_id": plan.environment_id,
-        "backend": plan.backend,
-        "status": status,
-        "executed": executed,
-        "actions": [action.to_dict() for action in plan.actions],
-    }
-
-
-def package_install_result(
-    plan: PackageInstallPlan, status: str, executed: bool, tracked: bool | None = None
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "environment_id": plan.environment_id,
-        "package": plan.package,
-        "package_manager": plan.package_manager,
-        "status": status,
-        "executed": executed,
-        "actions": [action.to_dict() for action in plan.actions],
-    }
-    if tracked is not None:
-        result["tracked"] = tracked
-    return result
-
-
-def package_remove_result(
-    plan: PackageRemovePlan, status: str, executed: bool, tracked: bool | None = None
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "environment_id": plan.environment_id,
-        "package": plan.package,
-        "package_manager": plan.package_manager,
-        "status": status,
-        "executed": executed,
-        "actions": [action.to_dict() for action in plan.actions],
-    }
-    if tracked is not None:
-        result["tracked"] = tracked
-    return result
-
-
-def environment_inspection_result(manifest: EnvironmentManifest) -> dict[str, object]:
-    inspection = inspect_environment_runtime(manifest)
-    suggested_status = suggested_manifest_status(manifest.status, inspection.runtime_status)
-    consistent = suggested_status == manifest.status
-    return {
-        "environment_id": manifest.environment_id,
-        "manifest_status": manifest.status,
-        "runtime_status": inspection.runtime_status,
-        "consistent": consistent,
-        "suggested_status": suggested_status,
-    }
-
-
-def environment_summary_result(manifest: EnvironmentManifest) -> dict[str, object]:
-    inspection = environment_inspection_result(manifest)
-    return {
-        "environment_id": manifest.environment_id,
-        "name": manifest.name,
-        "image": manifest.image,
-        "manifest_status": manifest.status,
-        "runtime_status": inspection["runtime_status"],
-        "consistent": inspection["consistent"],
-        "suggested_status": inspection["suggested_status"],
-        "tracked_packages": manifest.installed_packages(),
-        "available_actions": available_environment_actions(
-            manifest.status,
-            str(inspection["runtime_status"]),
-            bool(inspection["consistent"]),
-        ),
-    }
-
-
-def available_environment_actions(
-    manifest_status: str,
-    runtime_status: str,
-    consistent: bool,
-) -> list[str]:
-    if manifest_status == "defined" and runtime_status == "missing":
-        return ["create-environment"]
-    if manifest_status in {"created", "stopped"} and runtime_status == "stopped":
-        return ["start-environment", "destroy-environment", "install-package", "remove-package"]
-    if manifest_status == "running" and runtime_status == "running":
-        return ["stop-environment", "install-package", "remove-package"]
-    if not consistent:
-        return ["reconcile-environment"]
-    return []
-
-
-def suggested_manifest_status(manifest_status: str, runtime_status: str) -> str | None:
-    if runtime_status == "running":
-        return "running"
-    if runtime_status == "stopped":
-        return "stopped"
-    if runtime_status == "missing":
-        if manifest_status in {"created", "running", "stopped"}:
-            return "defined"
-        if manifest_status == "defined":
-            return "defined"
-    return None
 
 
 def print_environment_inspection(result: dict[str, object]) -> None:
