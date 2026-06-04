@@ -20,6 +20,34 @@ def format_packages(packages: list[dict[str, str]]) -> str:
     return "\n".join(f"{package['name']}\t{package['manager']}\t{package['installed_at']}" for package in packages)
 
 
+def format_app_row(summary: dict[str, object]) -> str:
+    name = str(summary.get("name") or summary.get("app_id") or "unknown")
+    app_id = str(summary.get("app_id") or name)
+    backend = str(summary.get("backend") or "unknown")
+    if name == app_id:
+        return f"{name}\t{backend}"
+    return f"{name} ({app_id})\t{backend}"
+
+
+def format_app_details(summary: dict[str, object]) -> str:
+    lines = [
+        f"Name: {summary.get('name', '')}",
+        f"App ID: {summary.get('app_id', '')}",
+        f"Type: {summary.get('backend', '')}",
+        f"Status: {summary.get('status', '')}",
+        f"Trust tier: {summary.get('trust_tier', '')}",
+        f"Permissions: {summary.get('permissions_summary', '')}",
+        f"Source: {summary.get('source_summary', '')}",
+        f"Manifest: {summary.get('manifest_path', '')}",
+    ]
+    source_details = summary.get("source_details")
+    if isinstance(source_details, dict) and source_details:
+        lines.append("Source details:")
+        for key, value in source_details.items():
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
 def format_result(value: Any) -> str:
     if isinstance(value, dict):
         lines: list[str] = []

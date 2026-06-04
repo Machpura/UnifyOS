@@ -62,7 +62,7 @@ python -m appresolver.gui
 appresolver-gui
 ```
 
-The GUI uses the same resolver services as the CLI. It lists environments, shows summaries and tracked packages, displays plan-only actions, and asks for confirmation before execute actions. Execute actions run in a background Qt worker so the window remains responsive. The GUI is a prototype, not a full App Center.
+The GUI uses the same resolver services as the CLI. It opens with an Apps view for normal app management and an Environments view for runtime/environment details. Execute actions ask for confirmation and run in a background Qt worker so the window remains responsive. The GUI is a prototype, not a full App Center.
 
 Open a focused GUI dialog for one downloaded file:
 
@@ -71,7 +71,7 @@ python -m appresolver.gui --open ~/Downloads/Example.AppImage
 appresolver-gui --open ~/Downloads/Example.AppImage
 ```
 
-The focused dialog shows the detected file type, selected route, safety notes, and planned actions. It does not show the full manager window and does not mutate state on startup. AppImage is the only currently executable file-open route; unsupported file types show future route or refusal messages.
+The focused dialog is a compact confirmation prompt with a More details section for the technical plan and actions. It does not show the full manager window and does not mutate state on startup. AppImage is the only currently executable file-open route; unsupported file types show future route or refusal messages. After a successful import, the dialog shows a success state instead of offering Import again.
 
 Install a Flatpak app by ID:
 
@@ -353,6 +353,7 @@ Included:
 - managed AppImage import and uninstall
 - file-oriented `open PATH` detection and AppImage import routing
 - user-local desktop/MIME integration for App Resolver Open With routing
+- manager GUI with Apps and Environments views
 - focused GUI file-open dialog for one file at a time
 - environment definition manifests
 - Podman environment command planning

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from appresolver.gui.helpers import format_actions, format_error, format_packages, format_result
+from appresolver.gui.helpers import (
+    format_actions,
+    format_app_details,
+    format_app_row,
+    format_error,
+    format_packages,
+    format_result,
+)
 
 
 def test_format_actions_outputs_command_lines() -> None:
@@ -41,6 +48,41 @@ def test_format_packages_outputs_tracked_packages() -> None:
 
 def test_format_packages_empty_output() -> None:
     assert format_packages([]) == "No resolver-tracked packages."
+
+
+def test_format_app_row_outputs_name_id_and_backend() -> None:
+    assert (
+        format_app_row({"name": "Example", "app_id": "Example", "backend": "appimage"})
+        == "Example\tappimage"
+    )
+    assert (
+        format_app_row({"name": "Example App", "app_id": "com.example.App", "backend": "flatpak"})
+        == "Example App (com.example.App)\tflatpak"
+    )
+
+
+def test_format_app_details_outputs_summary_fields() -> None:
+    output = format_app_details(
+        {
+            "name": "Example",
+            "app_id": "Example",
+            "backend": "appimage",
+            "status": "installed",
+            "trust_tier": "unverified",
+            "permissions_summary": "sandboxed: False",
+            "source_summary": "Managed AppImage: Example.AppImage",
+            "manifest_path": "/state/apps/Example.json",
+            "source_details": {
+                "managed_path": "/state/appimages/Example.AppImage",
+                "launcher_path": "/state/launchers/Example.desktop",
+            },
+        }
+    )
+
+    assert "Name: Example" in output
+    assert "Type: appimage" in output
+    assert "Status: installed" in output
+    assert "managed_path: /state/appimages/Example.AppImage" in output
 
 
 def test_format_result_includes_actions_packages_and_available_actions() -> None:

@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -21,14 +20,24 @@ from PySide6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import AppResolverError
-from appresolver.gui.helpers import format_actions, format_error, format_packages, format_result
+from appresolver.gui.helpers import (
+    format_actions,
+    format_app_details,
+    format_app_row,
+    format_error,
+    format_packages,
+    format_result,
+)
 from appresolver.gui.workers import Worker
+from appresolver.registry import AppRegistry
+from appresolver.services import apps as app_services
 from appresolver.services import environments as environment_services
 from appresolver.services import packages as package_services
 from appresolver.services import summaries as summary_services
@@ -40,17 +49,64 @@ class AppResolverWindow(QMainWindow):
         super().__init__()
         self.registry_dir = registry_dir
         self.state_paths = StatePaths.from_registry_dir(registry_dir)
+        self.app_registry = AppRegistry(registry_dir)
         self.environment_registry = EnvironmentRegistry(self.state_paths.environments_dir)
         self.worker_thread: QThread | None = None
         self.worker: Worker | None = None
+        self.worker_result_target = "environments"
         self.action_buttons: list[QPushButton] = []
+        self.app_action_buttons: list[QPushButton] = []
 
         self.setWindowTitle("App Resolver")
         self.resize(1100, 720)
         self.setCentralWidget(self.build_ui())
+        self.refresh_apps()
         self.refresh_environments()
 
     def build_ui(self) -> QWidget:
+        tabs = QTabWidget()
+        tabs.addTab(self.build_apps_tab(), "Apps")
+        tabs.addTab(self.build_environments_tab(), "Environments")
+        return tabs
+
+    def build_apps_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        self.apps_refresh_button = QPushButton("Refresh")
+        self.apps_refresh_button.clicked.connect(self.refresh_apps)
+        self.app_list = QListWidget()
+        self.app_list.currentItemChanged.connect(self.app_selected)
+        left_layout.addWidget(self.apps_refresh_button)
+        left_layout.addWidget(self.app_list, 1)
+        splitter.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.app_details = QPlainTextEdit()
+        self.app_details.setReadOnly(True)
+        self.app_details.setPlaceholderText("Select an app")
+        right_layout.addWidget(self.app_details, 1)
+
+        action_row = QHBoxLayout()
+        self.app_uninstall_button = self.add_app_action_button("Uninstall", self.execute_uninstall_app)
+        self.app_launch_button = self.add_app_action_button("Launch (future)", lambda: None)
+        self.app_launch_button.setEnabled(False)
+        action_row.addWidget(self.app_uninstall_button)
+        action_row.addWidget(self.app_launch_button)
+        action_row.addStretch(1)
+        right_layout.addLayout(action_row)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        return root
+
+    def build_environments_tab(self) -> QWidget:
         root = QWidget()
         root_layout = QVBoxLayout(root)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -156,6 +212,67 @@ class AppResolverWindow(QMainWindow):
         button.clicked.connect(callback)
         self.action_buttons.append(button)
         return button
+
+    def add_app_action_button(self, label: str, callback: Callable[[], None]) -> QPushButton:
+        button = QPushButton(label)
+        button.clicked.connect(callback)
+        self.app_action_buttons.append(button)
+        return button
+
+    def refresh_apps(self) -> None:
+        current_id = self.selected_app_id()
+        self.app_list.clear()
+        try:
+            summaries = app_services.list_app_summaries(self.app_registry)
+        except AppResolverError as exc:
+            self.show_app_error(exc)
+            return
+
+        selected_row = 0
+        for index, summary in enumerate(summaries):
+            item = QListWidgetItem(format_app_row(summary))
+            item.setData(Qt.ItemDataRole.UserRole, summary["app_id"])
+            self.app_list.addItem(item)
+            if summary["app_id"] == current_id:
+                selected_row = index
+        if summaries:
+            self.app_list.setCurrentRow(selected_row)
+        else:
+            self.app_details.setPlainText("No resolver-managed apps.")
+
+    def app_selected(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        app_id = self.selected_app_id()
+        if app_id is None:
+            return
+        try:
+            summary = app_services.load_app_summary(self.app_registry, app_id)
+        except AppResolverError as exc:
+            self.show_app_error(exc)
+            return
+        self.app_details.setPlainText(format_app_details(summary))
+
+    def selected_app_id(self) -> str | None:
+        item = self.app_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return str(value) if value is not None else None
+
+    def execute_uninstall_app(self) -> None:
+        app_id = self.selected_app_id()
+        if app_id is None:
+            self.show_app_error(ValueError("select an app first"))
+            return
+        self.execute_action(
+            f"Uninstall app '{app_id}'?",
+            lambda: app_services.uninstall_app(self.app_registry, self.state_paths, app_id),
+            result_target="apps",
+        )
+
+    def show_app_error(self, error: BaseException) -> None:
+        self.app_details.setPlainText(format_error(error))
 
     def refresh_environments(self) -> None:
         current_id = self.selected_environment_id()
@@ -366,7 +483,7 @@ class AppResolverWindow(QMainWindow):
             return
         self.execute_action(prompt, lambda: task_factory(environment_id))
 
-    def execute_action(self, prompt: str, task: Callable[[], Any]) -> None:
+    def execute_action(self, prompt: str, task: Callable[[], Any], result_target: str = "environments") -> None:
         if QMessageBox.question(
             self,
             "Confirm Execute Action",
@@ -376,7 +493,10 @@ class AppResolverWindow(QMainWindow):
             return
 
         self.set_actions_enabled(False)
+        self.worker_result_target = result_target
         self.details.setPlainText("Running...")
+        if result_target == "apps":
+            self.app_details.setPlainText("Running...")
         thread = QThread(self)
         worker = Worker(task)
         worker.moveToThread(thread)
@@ -394,23 +514,40 @@ class AppResolverWindow(QMainWindow):
     @Slot(object)
     def worker_result(self, result: object) -> None:
         output = getattr(result, "output", result)
-        self.show_details(output)
+        if self.worker_result_target == "apps":
+            self.app_details.setPlainText(format_result(output))
+        else:
+            self.show_details(output)
 
     @Slot(object)
     def worker_error(self, error: object) -> None:
         if isinstance(error, BaseException):
-            self.show_error(error)
+            if self.worker_result_target == "apps":
+                self.show_app_error(error)
+            else:
+                self.show_error(error)
         else:
-            self.details.setPlainText(f"error: {error}")
+            if self.worker_result_target == "apps":
+                self.app_details.setPlainText(f"error: {error}")
+            else:
+                self.details.setPlainText(f"error: {error}")
 
     @Slot()
     def worker_finished(self) -> None:
         self.worker = None
         self.worker_thread = None
+        self.worker_result_target = "environments"
         self.set_actions_enabled(True)
+        self.refresh_apps()
         self.refresh_environments()
 
     def set_actions_enabled(self, enabled: bool) -> None:
+        self.apps_refresh_button.setEnabled(enabled)
+        self.app_list.setEnabled(enabled)
+        for button in self.app_action_buttons:
+            if button is self.app_launch_button:
+                continue
+            button.setEnabled(enabled)
         self.refresh_button.setEnabled(enabled)
         self.environment_list.setEnabled(enabled)
         self.package_input.setEnabled(enabled)

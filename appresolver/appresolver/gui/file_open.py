@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from appresolver.errors import AppResolverError
 from appresolver.gui.file_open_helpers import (
+    build_file_open_success_view,
     build_file_open_view,
     execute_file_open,
     imported_app_details,
@@ -53,12 +54,10 @@ class FileOpenDialog(QDialog):
 
         grid = QGridLayout()
         fields = [
-            ("full_path", "Path"),
-            ("detected_type", "Detected type"),
-            ("route", "Route"),
+            ("type_label", "Type"),
+            ("method_label", "Method"),
             ("supported_text", "Supported now"),
-            ("status", "Status"),
-            ("message", "Message"),
+            ("short_message", "Safety"),
         ]
         for row, (key, label) in enumerate(fields):
             grid.addWidget(QLabel(label), row, 0)
@@ -69,22 +68,15 @@ class FileOpenDialog(QDialog):
             grid.addWidget(value, row, 1)
         layout.addLayout(grid)
 
-        self.safety_notes = QPlainTextEdit()
-        self.safety_notes.setReadOnly(True)
-        self.safety_notes.setMaximumHeight(90)
-        layout.addWidget(QLabel("Safety notes"))
-        layout.addWidget(self.safety_notes)
-
-        self.actions = QPlainTextEdit()
-        self.actions.setReadOnly(True)
-        self.actions.setMaximumHeight(120)
-        layout.addWidget(QLabel("Planned actions"))
-        layout.addWidget(self.actions)
+        self.details_toggle = QPushButton("More details")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.toggled.connect(self.set_details_visible)
+        layout.addWidget(self.details_toggle)
 
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setPlaceholderText("Details and results")
-        layout.addWidget(QLabel("Details"))
+        self.details.setVisible(False)
         layout.addWidget(self.details, 1)
 
         button_row = QHBoxLayout()
@@ -103,16 +95,13 @@ class FileOpenDialog(QDialog):
         except AppResolverError as exc:
             self.plan_result = None
             self.title_label.setText(self.path.name)
-            self.labels["full_path"].setText(str(self.path))
-            self.labels["detected_type"].setText("unknown")
-            self.labels["route"].setText("unsupported")
+            self.labels["type_label"].setText("Unknown file")
+            self.labels["method_label"].setText("Unsupported file type")
             self.labels["supported_text"].setText("no")
-            self.labels["status"].setText("error")
-            self.labels["message"].setText(str(exc))
-            self.safety_notes.setPlainText("App Resolver could not inspect this file.")
-            self.actions.setPlainText("No planned actions.")
+            self.labels["short_message"].setText(str(exc))
             self.details.setPlainText(format_error(exc))
             self.action_button.setVisible(False)
+            self.cancel_button.setText("Close")
             return
 
         self.plan_result = result
@@ -120,20 +109,41 @@ class FileOpenDialog(QDialog):
         self.details.setPlainText(format_result(result))
 
     def show_view(self, view: dict[str, object]) -> None:
-        self.title_label.setText(str(view["file_name"]))
+        self.title_label.setText(str(view["title"]))
         for key, label in self.labels.items():
             label.setText(str(view[key]))
-        self.safety_notes.setPlainText("\n".join(str(note) for note in view["safety_notes"]))
-        planned_actions = view["planned_actions"]
-        if isinstance(planned_actions, list) and planned_actions:
-            self.actions.setPlainText("\n".join(str(action) for action in planned_actions))
-        else:
-            self.actions.setPlainText("No planned actions.")
+        self.details.setPlainText(self.format_details(view))
         can_execute = bool(view["can_execute"])
+        self.cancel_button.setText("Cancel" if can_execute else "Close")
         self.action_button.setVisible(can_execute)
         self.action_button.setEnabled(can_execute)
         if can_execute:
             self.action_button.setText(str(view["action_label"]))
+
+    def format_details(self, view: dict[str, object]) -> str:
+        lines = [
+            f"Full path: {view['full_path']}",
+            f"Internal route: {view['route']}",
+            f"Status code: {view['status']}",
+            f"Service message: {view['message']}",
+            "",
+            "Safety notes:",
+        ]
+        lines.extend(str(note) for note in view["safety_notes"])
+        lines.append("")
+        lines.append("Planned actions:")
+        planned_actions = view["planned_actions"]
+        if isinstance(planned_actions, list) and planned_actions:
+            lines.extend(str(action) for action in planned_actions)
+        else:
+            lines.append("No planned actions.")
+        lines.append("")
+        lines.append(format_result(view["raw_result"]))
+        return "\n".join(lines)
+
+    def set_details_visible(self, visible: bool) -> None:
+        self.details.setVisible(visible)
+        self.details_toggle.setText("Less details" if visible else "More details")
 
     def execute_action(self) -> None:
         self.set_running(True)
@@ -155,9 +165,16 @@ class FileOpenDialog(QDialog):
     @Slot(object)
     def worker_result(self, result: object) -> None:
         if isinstance(result, dict):
-            lines = ["Import completed.", *imported_app_details(result), "", format_result(result)]
+            success_view = build_file_open_success_view(result)
+            self.title_label.setText(str(success_view["title"]))
+            self.labels["type_label"].setText("AppImage")
+            self.labels["method_label"].setText("Managed AppImage import")
+            self.labels["supported_text"].setText("yes")
+            self.labels["short_message"].setText(str(success_view["success_message"]))
+            self.action_button.setVisible(False)
+            self.cancel_button.setText("Close")
+            lines = [str(success_view["success_message"]), *imported_app_details(result), "", format_result(result)]
             self.details.setPlainText("\n".join(line for line in lines if line != ""))
-            self.labels["status"].setText(str(result.get("status", "imported")))
         else:
             self.details.setPlainText(format_result(result))
 
