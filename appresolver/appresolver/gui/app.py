@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -28,29 +28,11 @@ from PySide6.QtWidgets import (
 from appresolver.environment_registry import EnvironmentRegistry
 from appresolver.errors import AppResolverError
 from appresolver.gui.helpers import format_actions, format_error, format_packages, format_result
+from appresolver.gui.workers import Worker
 from appresolver.services import environments as environment_services
 from appresolver.services import packages as package_services
 from appresolver.services import summaries as summary_services
 from appresolver.state import StatePaths
-
-
-class Worker(QObject):
-    result = Signal(object)
-    error = Signal(object)
-    finished = Signal()
-
-    def __init__(self, task: Callable[[], Any]) -> None:
-        super().__init__()
-        self.task = task
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            self.result.emit(self.task())
-        except Exception as exc:  # noqa: BLE001 - surfaced to the GUI log.
-            self.error.emit(exc)
-        finally:
-            self.finished.emit()
 
 
 class AppResolverWindow(QMainWindow):

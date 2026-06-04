@@ -57,6 +57,7 @@ def test_install_execute_writes_desktop_file_and_mime_xml(
     assert result["warnings"] == []
     assert desktop_file.read_text(encoding="utf-8") == desktop_integration.desktop_file_contents()
     assert mime_file.read_text(encoding="utf-8") == desktop_integration.mime_xml_contents()
+    assert "Exec=appresolver-gui --open %f" in desktop_file.read_text(encoding="utf-8")
     assert "MimeType=application/x-appimage;application/vnd.debian.binary-package;" in desktop_file.read_text(
         encoding="utf-8"
     )

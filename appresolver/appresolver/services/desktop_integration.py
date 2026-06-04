@@ -105,7 +105,7 @@ def desktop_file_contents() -> str:
             "[Desktop Entry]",
             "Name=App Resolver",
             "Comment=Open files with App Resolver",
-            "Exec=python -m appresolver open %f",
+            "Exec=appresolver-gui --open %f",
             "Terminal=false",
             "Type=Application",
             "Categories=Utility;",
