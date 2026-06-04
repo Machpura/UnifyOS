@@ -660,6 +660,16 @@ def command_reconcile_environment(
             f"'{result['runtime_status']}'"
         )
 
+    if result["consistent"] is True:
+        output = {**result, "executed": False}
+        if as_json:
+            print_json(output)
+            return 0
+
+        print_environment_inspection(result)
+        print("No reconciliation needed.")
+        return 0
+
     if not execute:
         output = {**result, "executed": False}
         if as_json:
@@ -694,10 +704,7 @@ def command_reconcile_environment(
         print_json(output)
         return 0
 
-    if previous_status == suggested_status:
-        print(f"Environment {manifest.environment_id} is already consistent")
-    else:
-        print(f"Reconciled environment {manifest.environment_id}: {previous_status} -> {suggested_status}")
+    print(f"Reconciled environment {manifest.environment_id}: {previous_status} -> {suggested_status}")
     return 0
 
 
