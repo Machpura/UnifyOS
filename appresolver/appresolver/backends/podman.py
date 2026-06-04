@@ -55,6 +55,22 @@ class PackageInstallPlan:
 
 
 @dataclass(frozen=True)
+class PackageRemovePlan:
+    environment_id: str
+    package: str
+    package_manager: str
+    actions: list[PlannedAction]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "environment_id": self.environment_id,
+            "package": self.package,
+            "package_manager": self.package_manager,
+            "actions": [action.to_dict() for action in self.actions],
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeInspection:
     environment_id: str
     runtime_status: str
@@ -209,6 +225,62 @@ def plan_install_package(manifest: EnvironmentManifest, package_name: str) -> Pa
         )
 
     return PackageInstallPlan(
+        environment_id=manifest.environment_id,
+        package=package_name,
+        package_manager=package_manager,
+        actions=actions,
+    )
+
+
+def plan_remove_package(manifest: EnvironmentManifest, package_name: str) -> PackageRemovePlan:
+    if manifest.backend != "container":
+        raise BackendError(
+            f"Podman package removal planning requires environment backend 'container', got '{manifest.backend}'"
+        )
+    if manifest.status not in PACKAGE_INSTALL_STATUSES:
+        raise BackendError(
+            f"environment '{manifest.environment_id}' status is '{manifest.status}'; "
+            "package removal requires status 'created', 'running', or 'stopped'"
+        )
+
+    validate_package_name(package_name)
+    if not any(package["name"] == package_name for package in manifest.installed_packages()):
+        raise BackendError(
+            f"package '{package_name}' is not tracked as installed by App Resolver in environment "
+            f"'{manifest.environment_id}'"
+        )
+
+    package_manager = detect_package_manager(manifest.image)
+    container_name = container_name_for_environment(manifest)
+    actions: list[PlannedAction] = []
+
+    if manifest.status != "running":
+        actions.append(
+            PlannedAction(
+                id="start-container",
+                description="Start managed environment container",
+                command=["podman", "start", container_name],
+            )
+        )
+
+    if package_manager == "apt":
+        actions.append(
+            PlannedAction(
+                id="apt-remove",
+                description="Remove package with apt",
+                command=[
+                    "podman",
+                    "exec",
+                    container_name,
+                    "apt-get",
+                    "remove",
+                    "-y",
+                    package_name,
+                ],
+            )
+        )
+
+    return PackageRemovePlan(
         environment_id=manifest.environment_id,
         package=package_name,
         package_manager=package_manager,

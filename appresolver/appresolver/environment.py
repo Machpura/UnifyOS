@@ -124,6 +124,25 @@ class EnvironmentManifest:
             source=source,
         )
 
+    def without_installed_package(self, name: str) -> EnvironmentManifest:
+        packages = [package for package in self.installed_packages() if package["name"] != name]
+        source = dict(self.source)
+        if packages:
+            source["installed_packages"] = packages
+        else:
+            source.pop("installed_packages", None)
+        return EnvironmentManifest(
+            environment_id=self.environment_id,
+            name=self.name,
+            backend=self.backend,
+            image=self.image,
+            status=self.status,
+            created_at=self.created_at,
+            permissions=self.permissions,
+            apps=self.apps,
+            source=source,
+        )
+
     @classmethod
     def from_dict(cls, data: JsonObject) -> EnvironmentManifest:
         try:

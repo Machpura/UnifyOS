@@ -19,6 +19,7 @@ from appresolver.backends.appimage import (
 from appresolver.backends.flatpak import install_flatpak, uninstall_flatpak
 from appresolver.backends.podman import (
     PackageInstallPlan,
+    PackageRemovePlan,
     PodmanPlan,
     PlannedAction,
     execute_actions,
@@ -27,6 +28,7 @@ from appresolver.backends.podman import (
     plan_destroy_environment,
     plan_environment,
     plan_install_package,
+    plan_remove_package,
     plan_start_environment,
     plan_stop_environment,
 )
@@ -264,6 +266,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="print structured JSON output",
     )
 
+    remove_package_parser = subparsers.add_parser(
+        "remove-package", help="remove a resolver-tracked package from a managed environment"
+    )
+    remove_package_parser.add_argument("environment_id")
+    remove_package_parser.add_argument("package_name")
+    remove_package_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute planned Podman package removal actions",
+    )
+    remove_package_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
+    environment_summary_parser = subparsers.add_parser(
+        "environment-summary", help="summarize manifest, runtime, packages, and available actions"
+    )
+    environment_summary_parser.add_argument("environment_id")
+    environment_summary_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print structured JSON output",
+    )
+
     list_parser = subparsers.add_parser("list", help="list resolver-managed apps")
     list_parser.add_argument(
         "--json",
@@ -372,6 +404,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "show-environment-packages":
             return command_show_environment_packages(environment_registry, args.environment_id, args.json_output)
+        if args.command == "remove-package":
+            return command_remove_package(
+                environment_registry,
+                args.environment_id,
+                args.package_name,
+                args.execute,
+                args.json_output,
+            )
+        if args.command == "environment-summary":
+            return command_environment_summary(environment_registry, args.environment_id, args.json_output)
         if args.command == "list":
             return command_list(registry, args.json_output)
         if args.command == "permissions":
@@ -865,6 +907,105 @@ def command_show_environment_packages(
     return 0
 
 
+def command_remove_package(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    package_name: str,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    plan = plan_remove_package(manifest, package_name)
+
+    if not execute:
+        if as_json:
+            print_json(package_remove_result(plan, status="planned-remove", executed=False))
+            return 0
+
+        print_package_remove_plan(plan)
+        print("Execution not performed. Re-run with --execute to remove the package.")
+        return 0
+
+    RuntimePolicy(mode=EXECUTE).require_runtime_mutation_allowed(
+        f"remove package {plan.package} from environment {manifest.environment_id}"
+    )
+    executed_actions = execute_package_remove_plan(environment_registry, manifest, plan)
+    untrack_installed_package(environment_registry, manifest.environment_id, plan.package)
+
+    if as_json:
+        print_json(package_remove_result(plan, status="removed", executed=True, tracked=False))
+        return 0
+
+    print(f"Removed and untracked package {plan.package} from environment {manifest.environment_id}")
+    print("Executed Podman actions:")
+    for action in executed_actions:
+        print(" ".join(action.command))
+    print(f"Manifest: {environment_registry.path_for(manifest.environment_id)}")
+    return 0
+
+
+def execute_package_remove_plan(
+    environment_registry: EnvironmentRegistry,
+    manifest: EnvironmentManifest,
+    plan: PackageRemovePlan,
+) -> list[PlannedAction]:
+    start_actions = [action for action in plan.actions if action.id == "start-container"]
+    remaining_actions = [action for action in plan.actions if action.id != "start-container"]
+    executed_actions: list[PlannedAction] = []
+
+    if start_actions:
+        execute_actions(start_actions)
+        executed_actions.extend(start_actions)
+        running_manifest = replace(manifest, status="running")
+        try:
+            environment_registry.update(running_manifest)
+        except AppResolverError as exc:
+            raise AppResolverError(
+                "environment runtime may be running but registry update failed "
+                f"for '{manifest.environment_id}': {exc}"
+            ) from exc
+
+    execute_actions(remaining_actions)
+    executed_actions.extend(remaining_actions)
+    return executed_actions
+
+
+def untrack_installed_package(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    package_name: str,
+) -> None:
+    manifest = environment_registry.load(environment_id)
+    untracked_manifest = manifest.without_installed_package(package_name)
+    try:
+        environment_registry.update(untracked_manifest)
+    except AppResolverError as exc:
+        raise AppResolverError(
+            "package may have been removed from the runtime but registry tracking failed "
+            f"for '{environment_id}': {exc}"
+        ) from exc
+
+
+def command_environment_summary(
+    environment_registry: EnvironmentRegistry,
+    environment_id: str,
+    as_json: bool,
+) -> int:
+    manifest = environment_registry.load(environment_id)
+    if manifest.backend != "container":
+        raise AppResolverError(
+            f"environment summary requires environment backend 'container', got '{manifest.backend}'"
+        )
+
+    summary = environment_summary_result(manifest)
+    if as_json:
+        print_json(summary)
+        return 0
+
+    print_environment_summary(summary)
+    return 0
+
+
 def command_import_appimage(registry: AppRegistry, state_paths: StatePaths, source_path: Path, dry_run: bool) -> int:
     resolved_source = validate_source_path(source_path)
     app_id = derive_app_id(resolved_source)
@@ -989,6 +1130,12 @@ def print_package_install_plan(plan: PackageInstallPlan) -> None:
         print(" ".join(action.command))
 
 
+def print_package_remove_plan(plan: PackageRemovePlan) -> None:
+    print(f"Planned Podman actions for {plan.environment_id}:")
+    for action in plan.actions:
+        print(" ".join(action.command))
+
+
 def create_environment_result(plan: PodmanPlan, status: str, executed: bool) -> dict[str, Any]:
     return environment_runtime_result(plan, status, executed)
 
@@ -1019,6 +1166,22 @@ def package_install_result(
     return result
 
 
+def package_remove_result(
+    plan: PackageRemovePlan, status: str, executed: bool, tracked: bool | None = None
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "environment_id": plan.environment_id,
+        "package": plan.package,
+        "package_manager": plan.package_manager,
+        "status": status,
+        "executed": executed,
+        "actions": [action.to_dict() for action in plan.actions],
+    }
+    if tracked is not None:
+        result["tracked"] = tracked
+    return result
+
+
 def environment_inspection_result(manifest: EnvironmentManifest) -> dict[str, object]:
     inspection = inspect_environment_runtime(manifest)
     suggested_status = suggested_manifest_status(manifest.status, inspection.runtime_status)
@@ -1030,6 +1193,41 @@ def environment_inspection_result(manifest: EnvironmentManifest) -> dict[str, ob
         "consistent": consistent,
         "suggested_status": suggested_status,
     }
+
+
+def environment_summary_result(manifest: EnvironmentManifest) -> dict[str, object]:
+    inspection = environment_inspection_result(manifest)
+    return {
+        "environment_id": manifest.environment_id,
+        "name": manifest.name,
+        "image": manifest.image,
+        "manifest_status": manifest.status,
+        "runtime_status": inspection["runtime_status"],
+        "consistent": inspection["consistent"],
+        "suggested_status": inspection["suggested_status"],
+        "tracked_packages": manifest.installed_packages(),
+        "available_actions": available_environment_actions(
+            manifest.status,
+            str(inspection["runtime_status"]),
+            bool(inspection["consistent"]),
+        ),
+    }
+
+
+def available_environment_actions(
+    manifest_status: str,
+    runtime_status: str,
+    consistent: bool,
+) -> list[str]:
+    if manifest_status == "defined" and runtime_status == "missing":
+        return ["create-environment"]
+    if manifest_status in {"created", "stopped"} and runtime_status == "stopped":
+        return ["start-environment", "destroy-environment", "install-package", "remove-package"]
+    if manifest_status == "running" and runtime_status == "running":
+        return ["stop-environment", "install-package", "remove-package"]
+    if not consistent:
+        return ["reconcile-environment"]
+    return []
 
 
 def suggested_manifest_status(manifest_status: str, runtime_status: str) -> str | None:
@@ -1054,6 +1252,33 @@ def print_environment_inspection(result: dict[str, object]) -> None:
         print(f"Suggested status: {result['suggested_status']}")
     else:
         print("Suggested status: unknown")
+
+
+def print_environment_summary(summary: dict[str, object]) -> None:
+    print(f"Environment {summary['environment_id']}:")
+    print(f"Name: {summary['name']}")
+    print(f"Image: {summary['image']}")
+    print(f"Manifest status: {summary['manifest_status']}")
+    print(f"Runtime status: {summary['runtime_status']}")
+    print(f"Consistent: {str(summary['consistent']).lower()}")
+    print(f"Suggested status: {summary['suggested_status']}")
+
+    packages = summary["tracked_packages"]
+    if isinstance(packages, list) and packages:
+        print("Tracked packages:")
+        for package in packages:
+            if isinstance(package, dict):
+                print(f"{package['name']}\t{package['manager']}\t{package['installed_at']}")
+    else:
+        print("Tracked packages: none")
+
+    actions = summary["available_actions"]
+    if isinstance(actions, list) and actions:
+        print("Available actions:")
+        for action in actions:
+            print(str(action))
+    else:
+        print("Available actions: none")
 
 
 def print_json(value: Any) -> None:

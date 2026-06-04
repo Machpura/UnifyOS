@@ -222,9 +222,34 @@ python -m appresolver show-environment-packages ubuntu-24.04-default
 python -m appresolver --json show-environment-packages ubuntu-24.04-default
 ```
 
-Package tracking records only packages installed through App Resolver in the current runtime container. It does not inventory all packages in the container or query the full apt database. Destroying the runtime clears tracked installed packages because the container no longer exists. Package history, package sync/reinstall, and package removal are not implemented yet.
+Remove a resolver-tracked package from the managed container. Without `--execute`, this prints the planned Podman commands and does not call Podman or mutate state:
+
+```bash
+python -m appresolver remove-package ubuntu-24.04-default curl
+python -m appresolver --json remove-package ubuntu-24.04-default curl
+```
+
+Execute the planned removal:
+
+```bash
+python -m appresolver remove-package ubuntu-24.04-default curl --execute
+python -m appresolver remove-package ubuntu-24.04-default curl --execute --json
+```
+
+`remove-package` only removes packages tracked as installed by App Resolver. It does not run `apt autoremove`, does not purge configuration, and does not inventory packages that were installed manually inside the container.
+
+Package tracking records only packages installed through App Resolver in the current runtime container. It does not inventory all packages in the container or query the full apt database. Destroying the runtime clears tracked installed packages because the container no longer exists. Package history and package sync/reinstall are not implemented yet.
 
 If an environment is `created` or `stopped`, `install-package --execute` starts it first, updates the manifest status to `running`, and leaves it running for now.
+
+Summarize an environment for future GUI/App Center consumers:
+
+```bash
+python -m appresolver environment-summary ubuntu-24.04-default
+python -m appresolver --json environment-summary ubuntu-24.04-default
+```
+
+`environment-summary` compares manifest status with Podman runtime state, includes resolver-tracked packages, and reports available actions. It does not mutate the manifest and does not reconcile automatically.
 
 Environment definitions are stored in `./.appresolver/environments/`. App Resolver does not export apps from containers or remove containers during failure cleanup in v0.
 
@@ -272,7 +297,8 @@ Included:
 - explicit Podman environment start/stop lifecycle with `--execute`
 - explicit Podman environment runtime cleanup with `destroy-environment --execute`
 - Podman runtime state inspection and manifest reconciliation
-- apt package installation and resolver-installed package tracking inside ubuntu/debian managed containers
+- apt package installation/removal and resolver-installed package tracking inside ubuntu/debian managed containers
+- environment summary output for future GUI/App Center consumers
 - dry-run support for Flatpak install, AppImage import, and uninstall
 - JSON output for list and permissions
 
@@ -286,6 +312,7 @@ Not included:
 - AppImage sandboxing
 - launcher export to `~/.local/share/applications`
 - app export from containers
-- package removal inside containers
+- apt autoremove or purge
+- package inventory for manually installed container packages
 - Podman availability checks
 - permission enforcement beyond Flatpak-reported permission readout

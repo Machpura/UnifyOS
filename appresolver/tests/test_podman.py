@@ -12,6 +12,7 @@ from appresolver.backends.podman import (
     plan_destroy_environment,
     plan_environment,
     plan_install_package,
+    plan_remove_package,
     plan_start_environment,
     plan_stop_environment,
     validate_package_name,
@@ -280,6 +281,94 @@ def test_plan_install_package_rejects_non_container_backend() -> None:
 def test_plan_install_package_rejects_invalid_status() -> None:
     with pytest.raises(BackendError, match="package install requires status"):
         plan_install_package(make_environment_manifest(status="defined"), "curl")
+
+
+def make_environment_manifest_with_package(status: str = "running") -> EnvironmentManifest:
+    return make_environment_manifest(status=status).with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+
+
+def test_plan_remove_package_for_running_environment_uses_apt_without_start() -> None:
+    plan = plan_remove_package(make_environment_manifest_with_package(status="running"), "curl")
+
+    assert plan.environment_id == "ubuntu-24.04-default"
+    assert plan.package == "curl"
+    assert plan.package_manager == "apt"
+    assert [action.id for action in plan.actions] == ["apt-remove"]
+    assert plan.actions[0].command == [
+        "podman",
+        "exec",
+        "appresolver-env-ubuntu-24.04-default",
+        "apt-get",
+        "remove",
+        "-y",
+        "curl",
+    ]
+
+
+@pytest.mark.parametrize("status", ["created", "stopped"])
+def test_plan_remove_package_for_non_running_environment_starts_first(status: str) -> None:
+    plan = plan_remove_package(make_environment_manifest_with_package(status=status), "curl")
+
+    assert [action.id for action in plan.actions] == ["start-container", "apt-remove"]
+    assert plan.actions[0].command == ["podman", "start", "appresolver-env-ubuntu-24.04-default"]
+
+
+def test_plan_remove_package_commands_are_lists_not_shell_strings() -> None:
+    plan = plan_remove_package(make_environment_manifest_with_package(status="running"), "curl")
+
+    for action in plan.actions:
+        assert isinstance(action.command, list)
+        assert all(isinstance(part, str) for part in action.command)
+
+
+def test_plan_remove_package_to_dict_keeps_command_arrays() -> None:
+    plan = plan_remove_package(make_environment_manifest_with_package(status="running"), "curl")
+
+    output = plan.to_dict()
+
+    assert output["package"] == "curl"
+    assert output["package_manager"] == "apt"
+    assert output["actions"][0]["command"] == [
+        "podman",
+        "exec",
+        "appresolver-env-ubuntu-24.04-default",
+        "apt-get",
+        "remove",
+        "-y",
+        "curl",
+    ]
+
+
+def test_plan_remove_package_rejects_untracked_package() -> None:
+    with pytest.raises(BackendError, match="not tracked"):
+        plan_remove_package(make_environment_manifest(status="running"), "curl")
+
+
+def test_plan_remove_package_rejects_non_container_backend() -> None:
+    with pytest.raises(BackendError, match="backend 'container'"):
+        plan_remove_package(
+            make_environment_manifest(backend="flatpak", status="running").with_installed_package(
+                "curl", "apt", "2026-06-03T12:00:00+00:00"
+            ),
+            "curl",
+        )
+
+
+def test_plan_remove_package_rejects_invalid_status() -> None:
+    with pytest.raises(BackendError, match="package removal requires status"):
+        plan_remove_package(make_environment_manifest_with_package(status="defined"), "curl")
+
+
+def test_plan_remove_package_rejects_unsupported_image() -> None:
+    with pytest.raises(BackendError, match="unsupported package manager"):
+        plan_remove_package(
+            make_environment_manifest(image="fedora:latest", status="running").with_installed_package(
+                "curl", "apt", "2026-06-03T12:00:00+00:00"
+            ),
+            "curl",
+        )
 
 
 def test_inspect_environment_runtime_detects_running_container(monkeypatch: pytest.MonkeyPatch) -> None:

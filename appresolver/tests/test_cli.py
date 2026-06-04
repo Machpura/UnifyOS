@@ -3352,3 +3352,445 @@ def test_show_environment_packages_empty_after_successful_destroy(
 
     assert exit_code == 0
     assert capsys.readouterr().out == "No resolver-tracked packages.\n"
+
+
+def test_remove_package_plan_only_does_not_call_subprocess_or_mutate_tracking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only remove-package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "podman exec appresolver-env-ubuntu-24.04-default apt-get remove -y curl" in output
+    assert "Execution not performed. Re-run with --execute to remove the package." in output
+    assert environment_registry.load("ubuntu-24.04-default").installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+def test_remove_package_requires_tracked_package_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="running")
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("untracked remove-package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl"])
+
+    assert exit_code == 1
+
+
+def test_remove_package_validates_package_name_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("invalid remove-package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "bad/name"])
+
+    assert exit_code == 1
+
+
+@pytest.mark.parametrize("status", ["created", "stopped"])
+def test_remove_package_execute_starts_non_running_environment_then_removes_and_untracks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status=status)
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    loaded_manifest = environment_registry.load("ubuntu-24.04-default")
+    assert exit_code == 0
+    assert calls == [
+        ["podman", "start", "appresolver-env-ubuntu-24.04-default"],
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "remove", "-y", "curl"],
+    ]
+    assert loaded_manifest.status == "running"
+    assert loaded_manifest.installed_packages() == []
+
+
+def test_remove_package_execute_running_environment_skips_start_and_untracks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert calls == [
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "remove", "-y", "curl"],
+    ]
+    assert environment_registry.load("ubuntu-24.04-default").installed_packages() == []
+    assert "Removed and untracked package curl from environment ubuntu-24.04-default" in output
+
+
+def test_remove_package_start_failure_prevents_apt_remove(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        raise CommandExecutionError("start failed")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert calls == [["podman", "start", "appresolver-env-ubuntu-24.04-default"]]
+    assert environment_registry.load("ubuntu-24.04-default").installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+def test_remove_package_apt_remove_failure_leaves_tracking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError("apt remove failed")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    assert exit_code == 1
+    assert environment_registry.load("ubuntu-24.04-default").installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+def test_remove_package_tracking_update_failure_after_apt_remove_warns_runtime_registry_divergence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+    calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    def fail_update(self: EnvironmentRegistry, manifest: EnvironmentManifest) -> None:
+        raise RegistryError("registry blocked")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+    monkeypatch.setattr(EnvironmentRegistry, "update", fail_update)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "remove-package", "ubuntu-24.04-default", "curl", "--execute"]
+    )
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert calls == [
+        ["podman", "exec", "appresolver-env-ubuntu-24.04-default", "apt-get", "remove", "-y", "curl"]
+    ]
+    assert "runtime but registry tracking failed" in stderr
+    assert environment_registry.load("ubuntu-24.04-default").installed_packages() == [
+        {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+    ]
+
+
+def test_global_json_remove_package_plan_outputs_structured_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fail_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("plan-only JSON remove-package must not call subprocess")
+
+    monkeypatch.setattr(podman, "run_command", fail_run_command)
+
+    exit_code = main(
+        ["--registry-dir", str(registry_dir), "--json", "remove-package", "ubuntu-24.04-default", "curl"]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["package"] == "curl"
+    assert output["package_manager"] == "apt"
+    assert output["status"] == "planned-remove"
+    assert output["executed"] is False
+    assert [action["id"] for action in output["actions"]] == ["apt-remove"]
+
+
+def test_subcommand_json_remove_package_execute_outputs_structured_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(
+        [
+            "--registry-dir",
+            str(registry_dir),
+            "remove-package",
+            "ubuntu-24.04-default",
+            "curl",
+            "--execute",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "removed"
+    assert output["executed"] is True
+    assert output["tracked"] is False
+    assert [action["id"] for action in output["actions"]] == ["apt-remove"]
+
+
+def test_environment_summary_reports_defined_missing_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="defined")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "environment-summary", "ubuntu-24.04-default"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Runtime status: missing" in output
+    assert "Consistent: true" in output
+    assert "create-environment" in output
+
+
+def test_environment_summary_reports_running_runtime_with_tracked_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "environment-summary", "ubuntu-24.04-default"])
+
+    assert exit_code == 0
+
+
+def test_environment_summary_json_running_runtime_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="running")
+    manifest = environment_registry.load("ubuntu-24.04-default").with_installed_package(
+        "curl", "apt", "2026-06-03T12:00:00+00:00"
+    )
+    environment_registry.update(manifest)
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": true, "Status": "running"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "environment-summary", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "environment_id": "ubuntu-24.04-default",
+        "name": "ubuntu-24.04-default",
+        "image": "ubuntu:24.04",
+        "manifest_status": "running",
+        "runtime_status": "running",
+        "consistent": True,
+        "suggested_status": "running",
+        "tracked_packages": [
+            {"name": "curl", "manager": "apt", "installed_at": "2026-06-03T12:00:00+00:00"}
+        ],
+        "available_actions": ["stop-environment", "install-package", "remove-package"],
+    }
+
+
+def test_environment_summary_reports_inconsistent_state_and_suggests_reconcile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "environment-summary", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["consistent"] is False
+    assert output["suggested_status"] == "defined"
+    assert output["available_actions"] == ["reconcile-environment"]
+
+
+def test_environment_summary_reports_created_stopped_runtime_actions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='[{"State": {"Running": false, "Status": "created"}}]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "--json", "environment-summary", "ubuntu-24.04-default"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["runtime_status"] == "stopped"
+    assert output["available_actions"] == [
+        "start-environment",
+        "destroy-environment",
+        "install-package",
+        "remove-package",
+    ]
+
+
+def test_environment_summary_does_not_mutate_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    environment_registry = save_environment_manifest(registry_dir, status="created")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "environment-summary", "ubuntu-24.04-default"])
+
+    assert exit_code == 0
+    assert environment_registry.load("ubuntu-24.04-default").status == "created"
+
+
+def test_environment_summary_subcommand_json_works(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    registry_dir = tmp_path / ".appresolver" / "apps"
+    save_environment_manifest(registry_dir, status="defined")
+
+    def fake_run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise CommandExecutionError('Error: no such object: "appresolver-env-ubuntu-24.04-default"')
+
+    monkeypatch.setattr(podman, "run_command", fake_run_command)
+
+    exit_code = main(["--registry-dir", str(registry_dir), "environment-summary", "ubuntu-24.04-default", "--json"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["available_actions"] == ["create-environment"]
